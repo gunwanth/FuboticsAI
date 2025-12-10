@@ -1,0 +1,8 @@
+{
+  "name": "fubotics-chat",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "concurrently \"npm run dev --prefix fubotics-chat-backend\" \"npm run dev --prefix fubotics-chat-frontend\""
+  }
+}

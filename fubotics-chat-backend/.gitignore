@@ -1,0 +1,40 @@
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.*
+*.env
+
+# SQLite DB files
+chat.db
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Build folder (if combined later)
+client/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Coverage
+coverage/
+
+# Misc
+*.tmp
+*.swp
+*.swo
+.idea/
+.vscode/
