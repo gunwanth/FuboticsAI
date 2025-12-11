@@ -1,16 +1,87 @@
-# React + Vite
+# Fubotics Chat Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A modern React-based chat interface for the Fubotics AI Chat application. Built with Vite for fast development and optimized builds.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Multi-Session Support**: Create and manage multiple chat sessions
+- **Real-time Messaging**: Send messages and receive AI responses
+- **Message History**: View complete conversation history
+- **Code Block Support**: Syntax-highlighted code blocks with copy functionality
+- **Session Management**: Rename, delete, and switch between chat sessions
+- **Responsive Design**: Works on desktop and tablet devices
 
-## React Compiler
+## Prerequisites
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Node.js (v14 or higher)
+- npm or yarn
 
-## Expanding the ESLint configuration
+## Installation
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+1. Clone the repository:
+```bash
+cd fubotics-chat-frontend
+```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Create a `.env` file in the root directory:
+```
+VITE_API_BASE_URL=http://localhost:5000
+```
+
+## Scripts
+
+- `npm run dev` - Start development server
+- `npm run build` - Build for production
+- `npm run preview` - Preview production build locally
+
+## Configuration
+
+The frontend connects to the backend API via the `VITE_API_BASE_URL` environment variable. Default is `http://localhost:5000`.
+
+## Project Structure
+
+- `src/App.jsx` - Main application component with chat logic
+- `src/App.css` - Application styling
+- `src/main.jsx` - Application entry point
+- `index.html` - HTML template
+
+## Key Components
+
+### App.jsx
+Manages:
+- Chat sessions (create, delete, select)
+- Message fetching and sending
+- UI state (loading, input, selected session)
+- Message rendering with code block support
+
+## Technology Stack
+
+- React 18 - UI framework
+- Vite - Build tool
+- Axios - HTTP client
+- CSS3 - Styling
+
+## Features in Detail
+
+### Session Management
+- Create new chat sessions with custom names
+- Switch between sessions instantly
+- Delete sessions with confirmation
+- Sidebar displays all active sessions
+
+### Message Rendering
+- User messages aligned right
+- AI responses aligned left
+- Automatic code block detection and formatting
+- Copy button for code blocks
+
+### Input Handling
+- Enter to send message
+- Shift+Enter for new line
+- Loading state prevents duplicate sends
+- Optimistic UI updates for better UX
