@@ -38,7 +38,22 @@ app.use(cors({
 }));
 
 // Ensure Express responds to preflight OPTIONS for all routes
-app.options("*", (req, res) => res.sendStatus(200));
+// Ensure Express handles OPTIONS preflight for all routes (safe — avoids path-to-regexp)
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    const origin = req.headers.origin || "";
+    // allow non-browser requests like curl (origin undefined)
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      res.header("Access-Control-Allow-Origin", origin || "*");
+      res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS,DELETE");
+      res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+      return res.sendStatus(200);
+    }
+    return res.status(403).send("CORS origin denied");
+  }
+  next();
+});
+
 
 // ---------- DB SETUP ----------
 const db = new sqlite3.Database("./chat.db");
