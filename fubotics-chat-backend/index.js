@@ -7,16 +7,38 @@ const Groq = require("groq-sdk");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS for development
-app.use(
-  cors({
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST", "DELETE"],
-    allowedHeaders: ["Content-Type"]
-  })
-);
+// ---------- CORS (dynamic allowlist) ----------
+// Provide allowed frontend origins via env var FRONTEND_ORIGINS (comma separated)
+// Example: FRONTEND_ORIGINS="http://localhost:5173,https://fubotics-ai.vercel.app"
+const defaultOrigins = [
+  "http://localhost:5173",
+  "https://fubotics-ai.vercel.app",     // <- replace with your Vercel domain
+  "https://fuboticsai.onrender.com"    // backend origin (optional)
+];
+
+const envList = process.env.FRONTEND_ORIGINS
+  ? process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
+  : [];
+
+const ALLOWED_ORIGINS = Array.from(new Set([...envList, ...defaultOrigins]));
 
 app.use(express.json());
+
+// CORS middleware with dynamic origin verification
+app.use(cors({
+  origin: function(origin, callback) {
+    // allow non-browser requests (curl, server-to-server) where origin is undefined
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    // otherwise reject
+    return callback(new Error("CORS origin denied: " + origin));
+  },
+  methods: ["GET", "POST", "OPTIONS", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+// Ensure Express responds to preflight OPTIONS for all routes
+app.options("*", (req, res) => res.sendStatus(200));
 
 // ---------- DB SETUP ----------
 const db = new sqlite3.Database("./chat.db");
@@ -108,18 +130,20 @@ function getMessagesBySession(sessionId) {
   });
 }
 
-// ---------- GROQ SETUP ----------
+// ---------- GROQ / AI SETUP ----------
 const groqKey = process.env.GROQ_API_KEY;
+if (!groqKey) {
+  console.warn("⚠️ GROQ_API_KEY is NOT set in environment!");
+} else {
+  console.log("✅ GROQ_API_KEY loaded.");
+}
 const groq = new Groq({ apiKey: groqKey });
 
 async function getAIReply(history) {
   try {
     const messages = [
       { role: "system", content: "You are a helpful assistant." },
-      ...history.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
+      ...history.map((m) => ({ role: m.role, content: m.content }))
     ];
 
     const response = await groq.chat.completions.create({
@@ -129,25 +153,25 @@ async function getAIReply(history) {
       temperature: 0.7,
     });
 
-    return response.choices?.[0]?.message?.content;
+    return response.choices?.[0]?.message?.content || "No reply from AI";
   } catch (err) {
-    console.log("❌ Groq error:", err.message);
+    console.error("❌ Groq error:", err.message || err);
     return "AI is currently unavailable, your backend and DB are working 🙂";
   }
 }
 
 // ---------- ROUTES ----------
-
 // Health
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, allowed_origins: ALLOWED_ORIGINS });
 });
 
 // List sessions
 app.get("/api/sessions", async (req, res) => {
   try {
     res.json({ sessions: await getSessions() });
-  } catch {
+  } catch (err) {
+    console.error("GET /api/sessions error:", err);
     res.status(500).json({ error: "Failed to fetch sessions" });
   }
 });
@@ -155,19 +179,14 @@ app.get("/api/sessions", async (req, res) => {
 // Create session
 app.post("/api/sessions", async (req, res) => {
   try {
-    console.log("📥 POST /api/sessions body:", req.body);
-
+    console.log("📥 POST /api/sessions body:", req.body, "origin:", req.headers.origin);
     let name = null;
-
     if (req.body && typeof req.body.name === "string") {
       name = req.body.name.trim();
       if (name === "") name = null;
     }
-
     const session = await createSession(name);
-
     console.log("💾 Created session:", session);
-
     res.status(201).json({ session });
   } catch (err) {
     console.error("❌ Failed to create session:", err);
@@ -177,17 +196,23 @@ app.post("/api/sessions", async (req, res) => {
 
 // Delete session
 app.delete("/api/sessions/:id", async (req, res) => {
-  const sessionId = parseInt(req.params.id, 10);
-  await deleteSession(sessionId);
-  res.json({ success: true });
+  try {
+    const sessionId = parseInt(req.params.id, 10);
+    await deleteSession(sessionId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /api/sessions error:", err);
+    res.status(500).json({ error: "Failed to delete session" });
+  }
 });
 
-// Get messages
+// Get messages by session
 app.get("/api/messages", async (req, res) => {
   try {
     const sessionId = parseInt(req.query.sessionId, 10);
     res.json({ messages: await getMessagesBySession(sessionId) });
-  } catch {
+  } catch (err) {
+    console.error("GET /api/messages error:", err);
     res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
@@ -201,12 +226,14 @@ app.post("/api/messages", async (req, res) => {
     const aiReply = await getAIReply(history);
     await insertMessage(sessionId, "assistant", aiReply);
     res.json({ messages: await getMessagesBySession(sessionId) });
-  } catch {
+  } catch (err) {
+    console.error("POST /api/messages error:", err);
     res.status(500).json({ error: "Failed to send message" });
   }
 });
 
 // ---------- START SERVER ----------
-app.listen(PORT, () =>
-  console.log(`🚀 Backend running at http://localhost:${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🚀 Backend running at http://localhost:${PORT}`);
+  console.log("Allowed origins:", ALLOWED_ORIGINS);
+});
