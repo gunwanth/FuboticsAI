@@ -2,6 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const Groq = require("groq-sdk");
 
 const app = express();
@@ -77,6 +79,15 @@ db.serialize(() => {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE,
+      password_hash TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   console.log("✅ SQLite ready (chat.db)");
 });
 
@@ -143,6 +154,49 @@ function getMessagesBySession(sessionId) {
       }
     );
   });
+}
+
+// ---------- USERS / AUTH HELPERS ----------
+const JWT_SECRET = process.env.JWT_SECRET || "please_change_this_secret";
+
+function createUser(username, password) {
+  return new Promise((resolve, reject) => {
+    const pwHash = bcrypt.hashSync(password, 10);
+    db.run(
+      "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+      [username, pwHash],
+      function (err) {
+        if (err) return reject(err);
+        resolve({ id: this.lastID, username });
+      }
+    );
+  });
+}
+
+function findUserByUsername(username) {
+  return new Promise((resolve, reject) => {
+    db.get("SELECT id, username, password_hash FROM users WHERE username = ?", [username], (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
+function signToken(user) {
+  return jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "7d" });
+}
+
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
+  const token = auth.split(" ")[1];
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
 }
 
 // ---------- GROQ / AI SETUP ----------
@@ -221,8 +275,8 @@ app.delete("/api/sessions/:id", async (req, res) => {
   }
 });
 
-// Get messages by session
-app.get("/api/messages", async (req, res) => {
+// Get messages by session (protected)
+app.get("/api/messages", authMiddleware, async (req, res) => {
   try {
     const sessionId = parseInt(req.query.sessionId, 10);
     res.json({ messages: await getMessagesBySession(sessionId) });
@@ -232,10 +286,11 @@ app.get("/api/messages", async (req, res) => {
   }
 });
 
-// Send message
-app.post("/api/messages", async (req, res) => {
+// Send message (protected)
+app.post("/api/messages", authMiddleware, async (req, res) => {
   try {
     const { sessionId, content } = req.body;
+    // record user message
     await insertMessage(sessionId, "user", content);
     const history = await getMessagesBySession(sessionId);
     const aiReply = await getAIReply(history);
@@ -245,6 +300,48 @@ app.post("/api/messages", async (req, res) => {
     console.error("POST /api/messages error:", err);
     res.status(500).json({ error: "Failed to send message" });
   }
+});
+
+// ---------- AUTH ROUTES ----------
+app.post("/api/signup", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: "username and password required" });
+
+    const existing = await findUserByUsername(username);
+    if (existing) return res.status(409).json({ error: "username taken" });
+
+    const user = await createUser(username, password);
+    const token = signToken(user);
+    res.status(201).json({ user: { id: user.id, username: user.username }, token });
+  } catch (err) {
+    console.error("POST /api/signup error:", err);
+    res.status(500).json({ error: "Failed to create user" });
+  }
+});
+
+app.post("/api/login", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: "username and password required" });
+
+    const user = await findUserByUsername(username);
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+    const ok = bcrypt.compareSync(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+    const token = signToken(user);
+    res.json({ user: { id: user.id, username: user.username }, token });
+  } catch (err) {
+    console.error("POST /api/login error:", err);
+    res.status(500).json({ error: "Failed to login" });
+  }
+});
+
+app.get("/api/me", authMiddleware, (req, res) => {
+  // req.user is the token payload
+  res.json({ user: req.user });
 });
 
 // ---------- START SERVER ----------

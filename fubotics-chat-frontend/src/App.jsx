@@ -7,15 +7,79 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
 export default function App() {
   const [sessions, setSessions] = useState([]);
+  const [token, setToken] = useState(localStorage.getItem("token") || null);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
 
   // Load sessions on mount
   useEffect(() => {
+    if (token) {
+      axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+    }
     fetchSessions();
   }, []);
+
+  // Try restore session (validate token)
+  useEffect(() => {
+    const t = localStorage.getItem("token");
+    if (t && !token) setToken(t);
+  }, []);
+
+  // keep axios header in sync when token changes
+  useEffect(() => {
+    if (token) axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+    else delete axios.defaults.headers.common["Authorization"];
+  }, [token]);
+
+  // Simple auth screen shown before entering the chat UI
+  function AuthScreen() {
+    const [localUser, setLocalUser] = useState("");
+    const [localPass, setLocalPass] = useState("");
+    const [localMode, setLocalMode] = useState("login");
+
+    async function handleLocalSubmit(e) {
+      e.preventDefault();
+      try {
+        const path = localMode === "signup" ? "/api/signup" : "/api/login";
+        const res = await axios.post(`${API_BASE}${path}`, { username: localUser, password: localPass });
+        const t = res.data.token;
+        if (t) {
+          setToken(t);
+          localStorage.setItem("token", t);
+          axios.defaults.headers.common["Authorization"] = `Bearer ${t}`;
+          setLocalUser("");
+          setLocalPass("");
+          // refresh sessions/messages as authenticated user
+          fetchSessions();
+        }
+      } catch (err) {
+        console.error("Auth error", err.response?.data || err.message || err);
+        alert(err.response?.data?.error || "Auth failed");
+      }
+    }
+
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <h2>{localMode === "login" ? "Login" : "Sign up"}</h2>
+          <form onSubmit={handleLocalSubmit} className="auth-form">
+            <input placeholder="username" value={localUser} onChange={(e) => setLocalUser(e.target.value)} />
+            <input placeholder="password" type="password" value={localPass} onChange={(e) => setLocalPass(e.target.value)} />
+            <div style={{display: 'flex', gap: 8}}>
+              <button type="submit">{localMode === "login" ? "Login" : "Create account"}</button>
+              <button type="button" onClick={() => setLocalMode(localMode === "login" ? "signup" : "login")}>{localMode === "login" ? "Need an account?" : "Have an account?"}</button>
+            </div>
+          </form>
+          <div style={{marginTop: 12}}>
+            <small>After signing in you'll enter the chat.</small>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   async function fetchSessions() {
     try {
@@ -31,6 +95,12 @@ export default function App() {
     } catch (err) {
       console.error("Error loading sessions", err);
     }
+  }
+
+  function handleLogout() {
+    setToken(null);
+    localStorage.removeItem("token");
+    delete axios.defaults.headers.common["Authorization"];
   }
 
   async function fetchMessages(sessionId) {
@@ -158,15 +228,23 @@ export default function App() {
 
   return (
     <div className="app">
+      {!token ? (
+        <div className="layout">
+          <AuthScreen />
+        </div>
+      ) : (
       <div className="layout">
 
         {/* SIDEBAR */}
-        <aside className="sidebar">
+        <aside className={`sidebar ${sidebarVisible ? '' : 'hidden'}`}>
           <div className="sidebar-header">
             <h2>Fubotics AI</h2>
             <button className="new-chat-btn" onClick={handleNewChat}>
               + New
             </button>
+            <div style={{marginLeft: 'auto'}}>
+              <button onClick={handleLogout}>Logout</button>
+            </div>
           </div>
 
           <div className="session-list">
@@ -203,6 +281,15 @@ export default function App() {
 
         {/* MAIN CHAT */}
         <main className="chat-area">
+          {/* Toggle Button */}
+          <button 
+            className="toggle-sidebar-btn" 
+            onClick={() => setSidebarVisible(!sidebarVisible)}
+            title={sidebarVisible ? "Hide chats" : "Show chats"}
+          >
+            {sidebarVisible ? '←' : '→'}
+          </button>
+
           <div className="chat-column">
 
             <header className="chat-header">
@@ -256,6 +343,7 @@ export default function App() {
         </main>
 
       </div>
+      )}
     </div>
   );
 }
