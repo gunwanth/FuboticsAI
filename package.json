@@ -4,5 +4,8 @@
   "private": true,
   "scripts": {
     "start": "concurrently \"npm run dev --prefix fubotics-chat-backend\" \"npm run dev --prefix fubotics-chat-frontend\""
+  },
+  "dependencies": {
+    "concurrently": "^9.2.1"
   }
 }

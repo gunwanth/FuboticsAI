@@ -13,6 +13,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [isTyping, setIsTyping] = useState(false);
 
   // Load sessions on mount
   useEffect(() => {
@@ -174,6 +175,7 @@ export default function App() {
     // Optimistic UI
     setMessages((prev) => [...prev, { id: Date.now(), role: "user", content: text }]);
 
+    setIsTyping(true);
     try {
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: selectedSessionId,
@@ -192,6 +194,7 @@ export default function App() {
       ]);
     } finally {
       setLoading(false);
+      setIsTyping(false);
     }
   }
 
@@ -240,10 +243,10 @@ export default function App() {
           <div className="sidebar-header">
             <h2>Fubotics AI</h2>
             <button className="new-chat-btn" onClick={handleNewChat}>
-              + New
+              ➕ New Chat
             </button>
             <div style={{marginLeft: 'auto'}}>
-              <button onClick={handleLogout}>Logout</button>
+              <button onClick={handleLogout}>🚪 Logout</button>
             </div>
           </div>
 
@@ -316,7 +319,7 @@ export default function App() {
                   >
                     <div className="bubble">
                       <div className="sender">
-                        {msg.role === "user" ? "You" : "AI"}
+                        {msg.role === "user" ? "👤 You" : "🤖 AI"}
                       </div>
                       <div className="content">
                         {renderMessageContent(msg.content)}
@@ -324,6 +327,19 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+
+              {isTyping && (
+                <div className="message-row ai-row">
+                  <div className="typing-indicator">
+                    <span>🤖 AI is typing</span>
+                    <div className="typing-dots">
+                      <div className="typing-dot"></div>
+                      <div className="typing-dot"></div>
+                      <div className="typing-dot"></div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="input-area">
@@ -335,7 +351,7 @@ export default function App() {
                 rows={2}
               />
               <button onClick={handleSend} disabled={loading}>
-                {loading ? "Sending..." : "Send"}
+                {loading ? "⏳ Sending..." : "🚀 Send"}
               </button>
             </div>
 

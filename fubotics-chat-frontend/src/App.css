@@ -6,11 +6,17 @@
 body {
   margin: 0;
   padding: 0;
-  background: #020617;
+  background: linear-gradient(135deg, #020617 0%, #0f172a 50%, #1e293b 100%);
   color: #e5e7eb;
-  font-family: system-ui, sans-serif;
+  font-family: 'Inter', system-ui, sans-serif;
   height: 100vh;
   overflow: hidden;
+  animation: backgroundShift 20s ease-in-out infinite alternate;
+}
+
+@keyframes backgroundShift {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 100% 50%; }
 }
 
 /* ROOT CONTAINER */
@@ -118,18 +124,23 @@ body {
 
 /* SIDEBAR */
 .sidebar {
-  width: 270px;
-  background: #020617;
-  border-right: 1px solid #111827;
-  padding: 16px;
+  width: 280px;
+  background: linear-gradient(180deg, #020617 0%, #0f172a 100%);
+  border-right: 1px solid rgba(17, 24, 39, 0.8);
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.4s ease;
   z-index: 10;
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.05);
 }
 
 .sidebar.hidden {
   transform: translateX(-100%);
+}
+
+.sidebar:not(.hidden) {
+  box-shadow: 2px 0 20px rgba(0, 0, 0, 0.3);
 }
 
 .sidebar-header {
@@ -467,17 +478,60 @@ body {
   color: white;
 }
 
+/* TYPING INDICATOR */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  border: 1px solid rgba(30, 41, 59, 0.8);
+  border-radius: 18px;
+  color: #64748b;
+  font-size: 0.875rem;
+  animation: pulse 2s infinite;
+  max-width: 75%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.typing-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  background: #64748b;
+  border-radius: 50%;
+  animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typing {
+  0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
 /* INPUT BOX STICKS TO BOTTOM */
 .input-area {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   width: 100%;
   max-width: 960px;
   margin: 0 auto;
-  padding: 12px 20px;
-  border-top: 1px solid #111827;
-  background: #020617;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(17, 24, 39, 0.8);
+  background: linear-gradient(180deg, #020617 0%, #0f172a 100%);
   flex-shrink: 0;
+  backdrop-filter: blur(10px);
 }
 
 textarea {
