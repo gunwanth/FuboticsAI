@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import "./App.css";
 
@@ -12,8 +12,9 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth > 768);
   const [isTyping, setIsTyping] = useState(false);
+  const chatWindowRef = useRef(null);
 
   // Load sessions on mount
   useEffect(() => {
@@ -22,6 +23,24 @@ export default function App() {
     }
     fetchSessions();
   }, []);
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (chatWindowRef.current) {
+      chatWindowRef.current.scrollTop = chatWindowRef.current.scrollHeight;
+    }
+  }, [messages, isTyping]);
+
+  // Handle window resize
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth <= 768 && sidebarVisible) {
+        // Don't auto-close on mobile, let user control it
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [sidebarVisible]);
 
   // Try restore session (validate token)
   useEffect(() => {
@@ -65,18 +84,40 @@ export default function App() {
     return (
       <div className="auth-screen">
         <div className="auth-card">
-          <h2>{localMode === "login" ? "Login" : "Sign up"}</h2>
-          <form onSubmit={handleLocalSubmit} className="auth-form">
-            <input placeholder="username" value={localUser} onChange={(e) => setLocalUser(e.target.value)} />
-            <input placeholder="password" type="password" value={localPass} onChange={(e) => setLocalPass(e.target.value)} />
-            <div style={{display: 'flex', gap: 8}}>
-              <button type="submit">{localMode === "login" ? "Login" : "Create account"}</button>
-              <button type="button" onClick={() => setLocalMode(localMode === "login" ? "signup" : "login")}>{localMode === "login" ? "Need an account?" : "Have an account?"}</button>
-            </div>
-          </form>
-          <div style={{marginTop: 12}}>
-            <small>After signing in you'll enter the chat.</small>
+          <div className="auth-logo">
+            <div className="logo-icon">AI</div>
+            <h2>Fubotics AI</h2>
           </div>
+          <h3>{localMode === "login" ? "Welcome Back" : "Create Account"}</h3>
+          <form onSubmit={handleLocalSubmit} className="auth-form">
+            <div className="input-group">
+              <input 
+                placeholder="Username" 
+                value={localUser} 
+                onChange={(e) => setLocalUser(e.target.value)}
+                required 
+              />
+            </div>
+            <div className="input-group">
+              <input 
+                placeholder="Password" 
+                type="password" 
+                value={localPass} 
+                onChange={(e) => setLocalPass(e.target.value)}
+                required 
+              />
+            </div>
+            <button type="submit" className="primary-btn">
+              {localMode === "login" ? "Login" : "Create Account"}
+            </button>
+            <button 
+              type="button" 
+              className="secondary-btn"
+              onClick={() => setLocalMode(localMode === "login" ? "signup" : "login")}
+            >
+              {localMode === "login" ? "Need an account?" : "Already have an account?"}
+            </button>
+          </form>
         </div>
       </div>
     );
@@ -131,6 +172,11 @@ export default function App() {
       setSessions((prev) => [newSession, ...prev]);
       setSelectedSessionId(newSession.id);
       setMessages([]);
+      
+      // Close sidebar on mobile after creating chat
+      if (window.innerWidth <= 768) {
+        setSidebarVisible(false);
+      }
     } catch (err) {
       console.error("Error creating session", err);
       alert("Failed to create chat");
@@ -189,7 +235,7 @@ export default function App() {
         {
           id: Date.now() + 1,
           role: "assistant",
-          content: "Error talking to server 😢",
+          content: "Error talking to server",
         },
       ]);
     } finally {
@@ -209,21 +255,167 @@ export default function App() {
     navigator.clipboard.writeText(text);
   }
 
+  // Close sidebar on mobile when chat area is clicked
+  function handleChatAreaClick() {
+    if (window.innerWidth <= 768 && sidebarVisible) {
+      setSidebarVisible(false);
+    }
+  }
+
+  // Select session and close sidebar on mobile
+  function handleSessionSelect(sessionId) {
+    setSelectedSessionId(sessionId);
+    fetchMessages(sessionId);
+    
+    // Close sidebar on mobile after selecting chat
+    if (window.innerWidth <= 768) {
+      setSidebarVisible(false);
+    }
+  }
+
+  // Enhanced markdown rendering with bold, tables, and code blocks
   function renderMessageContent(content) {
-    if (!content.includes("```")) return content;
+    let processedContent = content;
+    const elements = [];
+    let currentIndex = 0;
 
-    const parts = content.split("```");
+    // First, extract and process code blocks
+    const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+    let match;
+    const codeBlocks = [];
+    
+    while ((match = codeBlockRegex.exec(content)) !== null) {
+      codeBlocks.push({
+        index: match.index,
+        length: match[0].length,
+        language: match[1] || 'text',
+        code: match[2].trim(),
+        fullMatch: match[0]
+      });
+    }
 
-    return parts.map((part, index) => {
-      if (index % 2 === 1) {
-        return (
-          <div className="code-block" key={index}>
-            <button className="copy-btn" onClick={() => handleCopy(part)}>
+    // Split content by code blocks
+    let lastIndex = 0;
+    codeBlocks.forEach((block, idx) => {
+      // Process text before code block
+      if (block.index > lastIndex) {
+        const textSegment = content.substring(lastIndex, block.index);
+        elements.push(
+          <span key={`text-${idx}`}>
+            {renderTextWithFormatting(textSegment)}
+          </span>
+        );
+      }
+
+      // Add code block
+      elements.push(
+        <div className="code-block" key={`code-${idx}`}>
+          <div className="code-header">
+            <span className="code-language">{block.language}</span>
+            <button className="copy-btn" onClick={() => handleCopy(block.code)}>
               Copy
             </button>
-            <pre><code>{part}</code></pre>
+          </div>
+          <pre><code>{block.code}</code></pre>
+        </div>
+      );
+
+      lastIndex = block.index + block.length;
+    });
+
+    // Process remaining text after last code block
+    if (lastIndex < content.length) {
+      const textSegment = content.substring(lastIndex);
+      elements.push(
+        <span key={`text-final`}>
+          {renderTextWithFormatting(textSegment)}
+        </span>
+      );
+    }
+
+    return elements.length > 0 ? elements : renderTextWithFormatting(content);
+  }
+
+  // Render text with bold, tables, and other formatting
+  function renderTextWithFormatting(text) {
+    // Check for table formatting (simple markdown tables)
+    if (text.includes('|') && text.includes('\n')) {
+      const lines = text.split('\n');
+      const tableLines = [];
+      const nonTableLines = [];
+      let inTable = false;
+
+      lines.forEach(line => {
+        if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+          tableLines.push(line);
+          inTable = true;
+        } else if (inTable && line.trim() === '') {
+          inTable = false;
+        } else if (!inTable) {
+          nonTableLines.push(line);
+        }
+      });
+
+      if (tableLines.length > 0) {
+        return (
+          <div>
+            {renderTable(tableLines)}
+            {nonTableLines.length > 0 && (
+              <div>{renderBoldText(nonTableLines.join('\n'))}</div>
+            )}
           </div>
         );
+      }
+    }
+
+    return renderBoldText(text);
+  }
+
+  // Render table from markdown
+  function renderTable(lines) {
+    if (lines.length < 2) return renderBoldText(lines.join('\n'));
+
+    const parseRow = (line) => {
+      return line
+        .split('|')
+        .slice(1, -1)
+        .map(cell => cell.trim());
+    };
+
+    const headers = parseRow(lines[0]);
+    const rows = lines.slice(2).map(parseRow); // Skip separator line
+
+    return (
+      <div className="markdown-table-wrapper">
+        <table className="markdown-table">
+          <thead>
+            <tr>
+              {headers.map((header, idx) => (
+                <th key={idx}>{renderBoldText(header)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIdx) => (
+              <tr key={rowIdx}>
+                {row.map((cell, cellIdx) => (
+                  <td key={cellIdx}>{renderBoldText(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  // Render bold text (convert **text** to <strong>text</strong>)
+  function renderBoldText(text) {
+    const parts = text.split(/(\*\*.*?\*\*)/g);
+    
+    return parts.map((part, index) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={index}>{part.slice(2, -2)}</strong>;
       }
       return <span key={index}>{part}</span>;
     });
@@ -239,87 +431,121 @@ export default function App() {
       <div className="layout">
 
         {/* SIDEBAR */}
-        <aside className={`sidebar ${sidebarVisible ? '' : 'hidden'}`}>
+        <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
           <div className="sidebar-header">
-            <h2>Fubotics AI</h2>
-            <button className="new-chat-btn" onClick={handleNewChat}>
-              ➕ New Chat
-            </button>
-            <div style={{marginLeft: 'auto'}}>
-              <button onClick={handleLogout}>🚪 Logout</button>
+            <div className="brand">
+              <div className="brand-icon">AI</div>
+              <h2>Fubotics AI</h2>
             </div>
+            <button className="new-chat-btn" onClick={handleNewChat}>
+              <span className="btn-icon">+</span>
+              <span className="btn-text">New Chat</span>
+            </button>
           </div>
 
           <div className="session-list">
             {sessions.length === 0 && (
-              <div className="empty-sessions">No chats yet — create one 👇</div>
+              <div className="empty-sessions">
+                <div className="empty-icon">Chat</div>
+                <p>No chats yet</p>
+                <small>Create your first chat to get started</small>
+              </div>
             )}
 
             {sessions.map((session) => (
               <div
                 key={session.id}
-                className={
-                  "session-item" +
-                  (session.id === selectedSessionId ? " active" : "")
-                }
-                onClick={() => {
-                  setSelectedSessionId(session.id);
-                  fetchMessages(session.id);
-                }}
+                className={`session-item ${session.id === selectedSessionId ? 'active' : ''}`}
+                onClick={() => handleSessionSelect(session.id)}
               >
+                <div className="session-icon">•</div>
                 <span className="session-name">
                   {session.name ? session.name : `Chat ${session.id}`}
                 </span>
-
                 <button
                   className="delete-session-btn"
                   onClick={(e) => handleDeleteSession(session.id, e)}
+                  title="Delete chat"
                 >
                   ×
                 </button>
               </div>
             ))}
           </div>
+
+          <div className="sidebar-footer">
+            <button className="logout-btn" onClick={handleLogout}>
+              <span>↪</span> Logout
+            </button>
+          </div>
         </aside>
 
+        {/* Overlay for mobile */}
+        {sidebarVisible && window.innerWidth <= 768 && (
+          <div className="sidebar-overlay" onClick={() => setSidebarVisible(false)} />
+        )}
+
         {/* MAIN CHAT */}
-        <main className="chat-area">
+        <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''}`} onClick={handleChatAreaClick}>
           {/* Toggle Button */}
           <button 
             className="toggle-sidebar-btn" 
-            onClick={() => setSidebarVisible(!sidebarVisible)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setSidebarVisible(!sidebarVisible);
+            }}
             title={sidebarVisible ? "Hide chats" : "Show chats"}
           >
-            {sidebarVisible ? '←' : '→'}
+            <span className="toggle-icon">
+              {sidebarVisible ? '◀' : '▶'}
+            </span>
           </button>
 
           <div className="chat-column">
-
             <header className="chat-header">
-              <h1>Fubotics AI Chat</h1>
+              <div className="header-content">
+                <div className="header-icon">AI</div>
+                <h1>Fubotics AI</h1>
+              </div>
+              <div className="header-status">
+                <span className="status-dot"></span>
+                <span className="status-text">Online</span>
+              </div>
             </header>
 
-            <div className="chat-window">
+            <div className="chat-window" ref={chatWindowRef}>
               {!selectedSessionId && (
-                <div className="empty-state">Select a chat or create one</div>
+                <div className="empty-state">
+                  <div className="empty-state-content">
+                    <div className="empty-state-icon">Start</div>
+                    <h2>Welcome to Fubotics AI</h2>
+                    <p>Select a chat or create a new one to get started</p>
+                  </div>
+                </div>
               )}
 
               {selectedSessionId && messages.length === 0 && (
-                <div className="empty-state">Start the conversation 👋</div>
+                <div className="empty-state">
+                  <div className="empty-state-content">
+                    <div className="empty-state-icon">Hi</div>
+                    <h2>Start the conversation</h2>
+                    <p>Ask me anything!</p>
+                  </div>
+                </div>
               )}
 
               {selectedSessionId &&
                 messages.map((msg) => (
                   <div
                     key={msg.id + (msg.created_at || "")}
-                    className={
-                      "message-row " +
-                      (msg.role === "user" ? "user-row" : "ai-row")
-                    }
+                    className={`message-row ${msg.role === "user" ? "user-row" : "ai-row"}`}
                   >
+                    <div className="message-avatar">
+                      {msg.role === "user" ? "U" : "AI"}
+                    </div>
                     <div className="bubble">
                       <div className="sender">
-                        {msg.role === "user" ? "👤 You" : "🤖 AI"}
+                        {msg.role === "user" ? "You" : "Fubotics AI"}
                       </div>
                       <div className="content">
                         {renderMessageContent(msg.content)}
@@ -330,8 +556,8 @@ export default function App() {
 
               {isTyping && (
                 <div className="message-row ai-row">
+                  <div className="message-avatar">AI</div>
                   <div className="typing-indicator">
-                    <span>🤖 AI is typing</span>
                     <div className="typing-dots">
                       <div className="typing-dot"></div>
                       <div className="typing-dot"></div>
@@ -342,22 +568,26 @@ export default function App() {
               )}
             </div>
 
-            <div className="input-area">
-              <textarea
-                placeholder="Type your message..."
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                rows={2}
-              />
-              <button onClick={handleSend} disabled={loading}>
-                {loading ? "⏳ Sending..." : "🚀 Send"}
-              </button>
+            <div className="input-area" onClick={(e) => e.stopPropagation()}>
+              <div className="input-wrapper">
+                <textarea
+                  placeholder="Type your message..."
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  rows={1}
+                />
+                <button 
+                  className="send-btn" 
+                  onClick={handleSend} 
+                  disabled={loading || !input.trim()}
+                >
+                  {loading ? "..." : "Send"}
+                </button>
+              </div>
             </div>
-
           </div>
         </main>
-
       </div>
       )}
     </div>
