@@ -336,7 +336,7 @@ export default function App() {
     return elements.length > 0 ? elements : renderTextWithFormatting(content);
   }
 
-  // Render text with bold, tables, and other formatting
+  // Render text with bold, tables, lists, and other formatting
   function renderTextWithFormatting(text) {
     // Check for table formatting (simple markdown tables)
     if (text.includes('|') && text.includes('\n')) {
@@ -361,14 +361,96 @@ export default function App() {
           <div>
             {renderTable(tableLines)}
             {nonTableLines.length > 0 && (
-              <div>{renderBoldText(nonTableLines.join('\n'))}</div>
+              <div>{renderListsAndText(nonTableLines.join('\n'))}</div>
             )}
           </div>
         );
       }
     }
 
-    return renderBoldText(text);
+    return renderListsAndText(text);
+  }
+
+  // Render lists (bullet and numbered) and text
+  function renderListsAndText(text) {
+    const lines = text.split('\n');
+    const elements = [];
+    let currentList = null;
+    let currentListType = null;
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmedLine = line.trim();
+
+      // Check for bullet point (-, *, •)
+      const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
+      // Check for numbered list (1. 2. 3. etc)
+      const numberedMatch = trimmedLine.match(/^\d+\.\s+(.+)$/);
+
+      if (bulletMatch) {
+        if (currentListType !== 'ul') {
+          if (currentList) {
+            elements.push(currentList);
+          }
+          currentList = { type: 'ul', items: [] };
+          currentListType = 'ul';
+        }
+        currentList.items.push(bulletMatch[1]);
+      } else if (numberedMatch) {
+        if (currentListType !== 'ol') {
+          if (currentList) {
+            elements.push(currentList);
+          }
+          currentList = { type: 'ol', items: [] };
+          currentListType = 'ol';
+        }
+        currentList.items.push(numberedMatch[1]);
+      } else {
+        // Not a list item
+        if (currentList) {
+          elements.push(currentList);
+          currentList = null;
+          currentListType = null;
+        }
+        if (trimmedLine) {
+          elements.push({ type: 'text', content: line });
+        } else {
+          elements.push({ type: 'break' });
+        }
+      }
+      i++;
+    }
+
+    // Add remaining list if any
+    if (currentList) {
+      elements.push(currentList);
+    }
+
+    return elements.map((element, idx) => {
+      if (element.type === 'ul') {
+        return (
+          <ul key={idx} className="markdown-list">
+            {element.items.map((item, itemIdx) => (
+              <li key={itemIdx}>{renderBoldText(item)}</li>
+            ))}
+          </ul>
+        );
+      } else if (element.type === 'ol') {
+        return (
+          <ol key={idx} className="markdown-list">
+            {element.items.map((item, itemIdx) => (
+              <li key={itemIdx}>{renderBoldText(item)}</li>
+            ))}
+          </ol>
+        );
+      } else if (element.type === 'text') {
+        return <div key={idx}>{renderBoldText(element.content)}</div>;
+      } else if (element.type === 'break') {
+        return <br key={idx} />;
+      }
+      return null;
+    });
   }
 
   // Render table from markdown

@@ -655,6 +655,35 @@ body {
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* Lists */
+.markdown-list {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-list li {
+  margin: 0.5rem 0;
+  line-height: 1.6;
+}
+
+.markdown-list ul,
+.markdown-list ol {
+  margin-top: 0.5rem;
+  padding-left: 1.5rem;
+}
+
+.ai-row .markdown-list {
+  color: #2c3e50;
+}
+
+.user-row .markdown-list {
+  color: white;
+}
+
+.user-row .markdown-list li::marker {
+  color: rgba(255, 255, 255, 0.8);
+}
+
 /* Typing indicator */
 .typing-indicator {
   display: flex;
