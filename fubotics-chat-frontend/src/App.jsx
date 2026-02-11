@@ -2,7 +2,6 @@ import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import "./App.css";
 
-// App.jsx (top)
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
 export default function App() {
@@ -15,8 +14,12 @@ export default function App() {
   const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth > 768);
   const [isTyping, setIsTyping] = useState(false);
   const chatWindowRef = useRef(null);
+  const [dataAnalytics, setDataAnalytics] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState([]);
+  const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
+  const fileInputRef = useRef(null);
 
-  // Load sessions on mount
   useEffect(() => {
     if (token) {
       axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
@@ -24,14 +27,12 @@ export default function App() {
     fetchSessions();
   }, []);
 
-  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     if (chatWindowRef.current) {
       chatWindowRef.current.scrollTop = chatWindowRef.current.scrollHeight;
     }
   }, [messages, isTyping]);
 
-  // Handle window resize
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth <= 768 && sidebarVisible) {
@@ -42,19 +43,16 @@ export default function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, [sidebarVisible]);
 
-  // Try restore session (validate token)
   useEffect(() => {
     const t = localStorage.getItem("token");
     if (t && !token) setToken(t);
   }, []);
 
-  // keep axios header in sync when token changes
   useEffect(() => {
     if (token) axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
     else delete axios.defaults.headers.common["Authorization"];
   }, [token]);
 
-  // Simple auth screen shown before entering the chat UI
   function AuthScreen() {
     const [localUser, setLocalUser] = useState("");
     const [localPass, setLocalPass] = useState("");
@@ -72,7 +70,6 @@ export default function App() {
           axios.defaults.headers.common["Authorization"] = `Bearer ${t}`;
           setLocalUser("");
           setLocalPass("");
-          // refresh sessions/messages as authenticated user
           fetchSessions();
         }
       } catch (err) {
@@ -162,7 +159,7 @@ export default function App() {
       const defaultName = `Chat ${sessions.length + 1}`;
       const userInput = window.prompt("Enter chat name (optional):", defaultName);
 
-      if (userInput === null) return; // cancelled
+      if (userInput === null) return;
 
       const name = userInput.trim() === "" ? defaultName : userInput.trim();
 
@@ -172,8 +169,9 @@ export default function App() {
       setSessions((prev) => [newSession, ...prev]);
       setSelectedSessionId(newSession.id);
       setMessages([]);
+      setAttachedFiles([]);
+      setPendingAttachmentIds([]);
       
-      // Close sidebar on mobile after creating chat
       if (window.innerWidth <= 768) {
         setSidebarVisible(false);
       }
@@ -184,7 +182,7 @@ export default function App() {
   }
 
   async function handleDeleteSession(sessionId, e) {
-    e.stopPropagation(); // avoid selecting chat
+    e.stopPropagation();
 
     try {
       await axios.delete(`${API_BASE}/api/sessions/${sessionId}`);
@@ -201,31 +199,86 @@ export default function App() {
           setSelectedSessionId(null);
           setMessages([]);
         }
+        setAttachedFiles([]);
+        setPendingAttachmentIds([]);
       }
     } catch (err) {
       console.error("Error deleting session", err);
     }
   }
 
-  async function handleSend() {
-    if (!input.trim() || loading) return;
+  // Handle file attachment selection
+  async function handleFileAttachment(event) {
+    const files = Array.from(event.target.files);
+    if (files.length === 0) return;
     if (!selectedSessionId) {
       alert("Please create a chat first");
       return;
     }
 
-    const text = input.trim();
+    setUploading(true);
+    const formData = new FormData();
+    formData.append('sessionId', selectedSessionId);
+    files.forEach(file => {
+      formData.append('files', file);
+    });
+
+    try {
+      const response = await axios.post(`${API_BASE}/api/attachments`, formData);
+      
+      setAttachedFiles(prev => [...prev, ...files.map((f, idx) => ({
+        name: f.name,
+        id: response.data.attachmentIds[idx]
+      }))]);
+      
+      setPendingAttachmentIds(prev => [...prev, ...response.data.attachmentIds]);
+      
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('Failed to upload files: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
+  }
+
+  // Remove attached file
+  function removeAttachedFile(index) {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
+    setPendingAttachmentIds(prev => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleSend() {
+    if ((!input.trim() && attachedFiles.length === 0) || loading) return;
+    if (!selectedSessionId) {
+      alert("Please create a chat first");
+      return;
+    }
+
+    const text = input.trim() || "(Sent files)";
     setInput("");
     setLoading(true);
 
     // Optimistic UI
-    setMessages((prev) => [...prev, { id: Date.now(), role: "user", content: text }]);
+    const tempMsg = { 
+      id: Date.now(), 
+      role: "user", 
+      content: text,
+      attachments: attachedFiles.map(f => ({ filename: f.name }))
+    };
+    setMessages((prev) => [...prev, tempMsg]);
+
+    // Clear attached files from UI
+    const attachmentIdsToSend = [...pendingAttachmentIds];
+    setAttachedFiles([]);
+    setPendingAttachmentIds([]);
 
     setIsTyping(true);
     try {
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: selectedSessionId,
         content: text,
+        attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
       });
       setMessages(res.data.messages || []);
     } catch (err) {
@@ -255,31 +308,68 @@ export default function App() {
     navigator.clipboard.writeText(text);
   }
 
-  // Close sidebar on mobile when chat area is clicked
   function handleChatAreaClick() {
     if (window.innerWidth <= 768 && sidebarVisible) {
       setSidebarVisible(false);
     }
   }
 
-  // Select session and close sidebar on mobile
+  async function handleFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await axios.post(`${API_BASE}/api/upload-data`, formData);
+      setDataAnalytics(response.data);
+      alert('File processed successfully!');
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('Failed to upload and process file: ' + (error.response?.data?.error || error.message));
+    } finally {
+      setUploading(false);
+      event.target.value = '';
+    }
+  }
+
+  async function handleDownload(filename) {
+    try {
+      const response = await axios.get(`${API_BASE}/api/download/${filename}`, {
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Download error:', error);
+      alert('Failed to download file');
+    }
+  }
+
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
     fetchMessages(sessionId);
+    setAttachedFiles([]);
+    setPendingAttachmentIds([]);
     
-    // Close sidebar on mobile after selecting chat
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
     }
   }
 
-  // Enhanced markdown rendering with bold, tables, and code blocks
   function renderMessageContent(content) {
     let processedContent = content;
     const elements = [];
     let currentIndex = 0;
 
-    // First, extract and process code blocks
     const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
     let match;
     const codeBlocks = [];
@@ -294,10 +384,8 @@ export default function App() {
       });
     }
 
-    // Split content by code blocks
     let lastIndex = 0;
     codeBlocks.forEach((block, idx) => {
-      // Process text before code block
       if (block.index > lastIndex) {
         const textSegment = content.substring(lastIndex, block.index);
         elements.push(
@@ -307,7 +395,6 @@ export default function App() {
         );
       }
 
-      // Add code block
       elements.push(
         <div className="code-block" key={`code-${idx}`}>
           <div className="code-header">
@@ -323,7 +410,6 @@ export default function App() {
       lastIndex = block.index + block.length;
     });
 
-    // Process remaining text after last code block
     if (lastIndex < content.length) {
       const textSegment = content.substring(lastIndex);
       elements.push(
@@ -336,9 +422,7 @@ export default function App() {
     return elements.length > 0 ? elements : renderTextWithFormatting(content);
   }
 
-  // Render text with bold, tables, lists, and other formatting
   function renderTextWithFormatting(text) {
-    // Check for table formatting (simple markdown tables)
     if (text.includes('|') && text.includes('\n')) {
       const lines = text.split('\n');
       const tableLines = [];
@@ -371,7 +455,6 @@ export default function App() {
     return renderListsAndText(text);
   }
 
-  // Render lists (bullet and numbered) and text
   function renderListsAndText(text) {
     const lines = text.split('\n');
     const elements = [];
@@ -383,9 +466,7 @@ export default function App() {
       const line = lines[i];
       const trimmedLine = line.trim();
 
-      // Check for bullet point (-, *, •)
       const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
-      // Check for numbered list (1. 2. 3. etc)
       const numberedMatch = trimmedLine.match(/^\d+\.\s+(.+)$/);
 
       if (bulletMatch) {
@@ -407,7 +488,6 @@ export default function App() {
         }
         currentList.items.push(numberedMatch[1]);
       } else {
-        // Not a list item
         if (currentList) {
           elements.push(currentList);
           currentList = null;
@@ -422,7 +502,6 @@ export default function App() {
       i++;
     }
 
-    // Add remaining list if any
     if (currentList) {
       elements.push(currentList);
     }
@@ -453,7 +532,6 @@ export default function App() {
     });
   }
 
-  // Render table from markdown
   function renderTable(lines) {
     if (lines.length < 2) return renderBoldText(lines.join('\n'));
 
@@ -465,7 +543,7 @@ export default function App() {
     };
 
     const headers = parseRow(lines[0]);
-    const rows = lines.slice(2).map(parseRow); // Skip separator line
+    const rows = lines.slice(2).map(parseRow);
 
     return (
       <div className="markdown-table-wrapper">
@@ -491,7 +569,6 @@ export default function App() {
     );
   }
 
-  // Render bold text (convert **text** to <strong>text</strong>)
   function renderBoldText(text) {
     const parts = text.split(/(\*\*.*?\*\*)/g);
     
@@ -512,7 +589,6 @@ export default function App() {
       ) : (
       <div className="layout">
 
-        {/* SIDEBAR */}
         <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
           <div className="sidebar-header">
             <div className="brand">
@@ -562,14 +638,11 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Overlay for mobile */}
         {sidebarVisible && window.innerWidth <= 768 && (
           <div className="sidebar-overlay" onClick={() => setSidebarVisible(false)} />
         )}
 
-        {/* MAIN CHAT */}
         <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''}`} onClick={handleChatAreaClick}>
-          {/* Toggle Button */}
           <button 
             className="toggle-sidebar-btn" 
             onClick={(e) => {
@@ -629,6 +702,15 @@ export default function App() {
                       <div className="sender">
                         {msg.role === "user" ? "You" : "Fubotics AI"}
                       </div>
+                      {msg.attachments && msg.attachments.length > 0 && (
+                        <div className="message-attachments">
+                          {msg.attachments.map((att, idx) => (
+                            <div key={idx} className="attachment-badge">
+                              📎 {att.filename}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="content">
                         {renderMessageContent(msg.content)}
                       </div>
@@ -651,7 +733,34 @@ export default function App() {
             </div>
 
             <div className="input-area" onClick={(e) => e.stopPropagation()}>
+              {attachedFiles.length > 0 && (
+                <div className="attached-files-preview">
+                  {attachedFiles.map((file, idx) => (
+                    <div key={idx} className="attached-file-item">
+                      <span>📎 {file.name}</span>
+                      <button onClick={() => removeAttachedFile(idx)}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="input-wrapper">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileAttachment}
+                  style={{ display: 'none' }}
+                  multiple
+                  accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx"
+                  disabled={uploading}
+                />
+                <button
+                  className="attach-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || !selectedSessionId}
+                  title="Attach files"
+                >
+                  📎
+                </button>
                 <textarea
                   placeholder="Type your message..."
                   value={input}
@@ -659,14 +768,47 @@ export default function App() {
                   onKeyDown={handleKeyDown}
                   rows={1}
                 />
-                <button 
-                  className="send-btn" 
-                  onClick={handleSend} 
-                  disabled={loading || !input.trim()}
+                <button
+                  className="send-btn"
+                  onClick={handleSend}
+                  disabled={loading || (!input.trim() && attachedFiles.length === 0)}
                 >
                   {loading ? "..." : "Send"}
                 </button>
               </div>
+            </div>
+
+            <div className="data-analytics-section">
+              <div className="upload-area">
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={handleFileUpload}
+                  style={{ display: 'none' }}
+                  id="file-upload"
+                  disabled={uploading}
+                />
+                <label htmlFor="file-upload" className={`upload-btn ${uploading ? 'disabled' : ''}`}>
+                  {uploading ? 'Processing...' : 'Upload CSV for Data Analytics'}
+                </label>
+              </div>
+
+              {dataAnalytics && (
+                <div className="analytics-results">
+                  <h3>Data Analytics Results</h3>
+                  <p><strong>Columns:</strong> {dataAnalytics.structure.columns.join(', ')}</p>
+                  <p><strong>Rows:</strong> {dataAnalytics.structure.rowCount}</p>
+
+                  <div className="download-buttons">
+                    <button onClick={() => handleDownload(dataAnalytics.cleanedFile)}>
+                      Download Cleaned CSV
+                    </button>
+                    <button onClick={() => handleDownload(dataAnalytics.reportFile)}>
+                      Download JSON Report
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </main>

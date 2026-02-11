@@ -1,0 +1,73 @@
+{
+  "columns": [
+    "2",
+    "100",
+    "30001",
+    "100000",
+    "123456",
+    "E1001",
+    "John",
+    "Thomas",
+    "1976-09-01",
+    "M",
+    "5631 Rice, OakPark,IL"
+  ],
+  "stats": {
+    "2": {
+      "count": 9,
+      "mean": "5.00",
+      "median": "5.00"
+    },
+    "100": {
+      "count": 9,
+      "mean": "418.22",
+      "median": "400.00"
+    },
+    "30001": {
+      "count": 9,
+      "mean": "30002.56",
+      "median": "30003.00"
+    },
+    "100000": {
+      "count": 9,
+      "mean": "68888.89",
+      "median": "70000.00"
+    },
+    "123456": {
+      "count": 9,
+      "mean": "123427.67",
+      "median": "123414.00"
+    },
+    "E1001": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "John": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Thomas": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "1976-09-01": {
+      "count": 9,
+      "mean": "1980.89",
+      "median": "1981.00"
+    },
+    "M": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "5631 Rice, OakPark,IL": {
+      "count": 9,
+      "mean": "287.22",
+      "median": "145.00"
+    }
+  },
+  "rowCount": 9
+}

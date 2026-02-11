@@ -1,0 +1,109 @@
+{
+  "columns": [
+    "App",
+    "Category",
+    "Rating",
+    "Reviews",
+    "Size",
+    "Installs",
+    "Type",
+    "Price",
+    "Content Rating",
+    "Genres",
+    "Last Updated",
+    "Current Ver",
+    "Android Ver",
+    "Translated_Review",
+    "Sentiment",
+    "Sentiment_Polarity",
+    "Sentiment_Subjectivity"
+  ],
+  "stats": {
+    "App": {
+      "count": 40422,
+      "mean": "129.07",
+      "median": "129.07"
+    },
+    "Category": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Rating": {
+      "count": 40422,
+      "mean": "4.32",
+      "median": "4.40"
+    },
+    "Reviews": {
+      "count": 40422,
+      "mean": "2196703.23",
+      "median": "110877.00"
+    },
+    "Size": {
+      "count": 40422,
+      "mean": "36.81",
+      "median": "36.81"
+    },
+    "Installs": {
+      "count": 40422,
+      "mean": "59003471.25",
+      "median": "10000000.00"
+    },
+    "Type": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Price": {
+      "count": 40422,
+      "mean": "0.08",
+      "median": "0.00"
+    },
+    "Content Rating": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Genres": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Last Updated": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Current Ver": {
+      "count": 40422,
+      "mean": "796.53",
+      "median": "4.40"
+    },
+    "Android Ver": {
+      "count": 40422,
+      "mean": "4.05",
+      "median": "4.05"
+    },
+    "Translated_Review": {
+      "count": 40422,
+      "mean": "115340.42",
+      "median": "115340.42"
+    },
+    "Sentiment": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Sentiment_Polarity": {
+      "count": 40422,
+      "mean": "0.17",
+      "median": "0.14"
+    },
+    "Sentiment_Subjectivity": {
+      "count": 40422,
+      "mean": "0.50",
+      "median": "0.51"
+    }
+  },
+  "rowCount": 40422
+}
