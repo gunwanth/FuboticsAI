@@ -71,6 +71,7 @@ Visit `http://localhost:5173` (or your frontend dev URL) to access the applicati
 For detailed information, see:
 - [Backend README](./fubotics-chat-backend/README.md)
 - [Frontend README](./fubotics-chat-frontend/README.md)
+- [Troubleshooting Guide](./TROUBLESHOOTING.md)
 
 ## Tech Stack
 
