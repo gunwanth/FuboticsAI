@@ -1144,3 +1144,1036 @@ body {
     font-size: 14px;
   }
 }
+/* Additional styles for file attachments - Add these to your App.css */
+
+/* Attach button next to input */
+.attach-btn {
+  background: #f0f0f0;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 20px;
+  transition: all 0.2s;
+  margin-right: 8px;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: scale(1.05);
+}
+
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Analytics upload button */
+.analytics-upload-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 500;
+  transition: all 0.3s;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  width: 100%;
+}
+
+.analytics-upload-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+}
+
+.analytics-upload-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Generated Files Section */
+.generated-files-section,
+.uploaded-files-section {
+  margin-top: 20px;
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.generated-files-section h3,
+.uploaded-files-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.generated-files-list,
+.uploaded-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.generated-file-item,
+.uploaded-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: white;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  transition: all 0.2s;
+}
+
+.generated-file-item:hover,
+.uploaded-file-item:hover {
+  border-color: #667eea;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.file-icon {
+  font-size: 24px;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-name {
+  font-weight: 500;
+  color: #333;
+  font-size: 14px;
+}
+
+.file-meta {
+  font-size: 12px;
+  color: #666;
+}
+
+.download-file-btn {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.download-file-btn:hover {
+  background: #5568d3;
+  transform: translateY(-1px);
+}
+
+/* Attached files preview above input */
+.attached-files-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.attached-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.attached-file-item button {
+  background: none;
+  border: none;
+  color: #ff4444;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.attached-file-item button:hover {
+  color: #cc0000;
+}
+
+/* Message attachments display */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  font-size: 12px;
+  color: #555;
+}
+
+.user-row .attachment-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+/* Update input wrapper to accommodate attach button */
+.input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.input-wrapper textarea {
+  flex: 1;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .attached-files-preview {
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .attach-btn {
+    padding: 8px 12px;
+    font-size: 18px;
+  }
+  
+  .analytics-upload-btn {
+    padding: 10px 20px;
+    font-size: 14px;
+  }
+  
+  .generated-file-item,
+  .uploaded-file-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  
+  .download-file-btn {
+    width: 100%;
+  }
+}
+/* FILES SIDEBAR STYLES - Add these to your App.css */
+
+/* Header Actions */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.files-toggle-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.files-toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+/* Files Sidebar */
+.files-sidebar {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: #ffffff;
+  border-left: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.3s ease;
+  z-index: 1000;
+  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.files-sidebar.hidden {
+  transform: translateX(100%);
+}
+
+.files-sidebar.visible {
+  transform: translateX(0);
+}
+
+.files-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  border-bottom: 2px solid #f0f0f0;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.files-sidebar-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.close-files-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+  font-size: 28px;
+  cursor: pointer;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  line-height: 1;
+}
+
+.close-files-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+  transform: rotate(90deg);
+}
+
+.files-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.no-session-message {
+  text-align: center;
+  padding: 40px 20px;
+  color: #666;
+}
+
+.no-session-message p {
+  font-size: 16px;
+  margin: 0;
+}
+
+/* Upload CSV Section */
+.upload-csv-section {
+  margin-bottom: 10px;
+}
+
+.analytics-upload-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.3s;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  width: 100%;
+}
+
+.analytics-upload-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+}
+
+.analytics-upload-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* File Category */
+.file-category {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.category-title {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-files {
+  text-align: center;
+  padding: 20px;
+  color: #999;
+}
+
+.empty-files p {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  color: #666;
+}
+
+.empty-files small {
+  font-size: 12px;
+  color: #999;
+}
+
+/* File Item */
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: white;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  transition: all 0.2s;
+}
+
+.file-item:hover {
+  border-color: #667eea;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+  transform: translateX(-2px);
+}
+
+.file-icon-wrapper {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.file-info-wrapper {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-name-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size-text {
+  font-size: 11px;
+  color: #999;
+}
+
+.file-download-btn {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.file-download-btn:hover {
+  background: #5568d3;
+  transform: scale(1.1);
+}
+
+/* Files Sidebar Overlay (mobile) */
+.files-sidebar-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999;
+}
+
+/* Attach button next to input */
+.attach-btn {
+  background: #f0f0f0;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 20px;
+  transition: all 0.2s;
+  margin-right: 8px;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: scale(1.05);
+}
+
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Attached files preview above input */
+.attached-files-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.attached-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.attached-file-item button {
+  background: none;
+  border: none;
+  color: #ff4444;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.attached-file-item button:hover {
+  color: #cc0000;
+}
+
+/* Message attachments display */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  font-size: 12px;
+  color: #555;
+}
+
+.user-row .attachment-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+/* Update input wrapper to accommodate attach button */
+.input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.input-wrapper textarea {
+  flex: 1;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  .files-sidebar {
+    width: 280px;
+  }
+}
+
+@media (max-width: 768px) {
+  .files-sidebar {
+    width: 100%;
+    max-width: 320px;
+  }
+
+  .attached-files-preview {
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .attach-btn {
+    padding: 8px 12px;
+    font-size: 18px;
+  }
+  
+  .analytics-upload-btn {
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+
+  .files-toggle-btn {
+    font-size: 13px;
+    padding: 6px 12px;
+  }
+
+  .header-status {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .files-toggle-btn span {
+    display: none;
+  }
+
+  .files-toggle-btn::after {
+    content: '📁';
+  }
+}
+/* FILES SIDEBAR STYLES - Add these to your App.css */
+
+/* Chat area adjustment when files sidebar is open */
+.chat-area.files-open {
+  margin-right: 320px;
+}
+
+@media (max-width: 1024px) {
+  .chat-area.files-open {
+    margin-right: 280px;
+  }
+}
+
+@media (max-width: 768px) {
+  .chat-area.files-open {
+    margin-right: 0;
+  }
+}
+
+/* CSV Upload Button (next to send) */
+.csv-upload-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 20px;
+  transition: all 0.3s;
+  margin-left: 8px;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.csv-upload-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.csv-upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Header Actions */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.files-toggle-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.files-toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.files-toggle-btn.active {
+  background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+}
+
+/* Files Sidebar */
+.files-sidebar {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: #ffffff;
+  border-left: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.3s ease;
+  z-index: 1000;
+  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.files-sidebar.hidden {
+  transform: translateX(100%);
+}
+
+.files-sidebar.visible {
+  transform: translateX(0);
+}
+
+.files-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  border-bottom: 2px solid #f0f0f0;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.files-sidebar-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.close-files-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+  font-size: 28px;
+  cursor: pointer;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  line-height: 1;
+}
+
+.close-files-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+  transform: rotate(90deg);
+}
+
+.files-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.no-session-message {
+  text-align: center;
+  padding: 40px 20px;
+  color: #666;
+}
+
+.no-session-message p {
+  font-size: 16px;
+  margin: 0;
+}
+
+/* File Category */
+.file-category {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.category-title {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-files {
+  text-align: center;
+  padding: 20px;
+  color: #999;
+}
+
+.empty-files p {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  color: #666;
+}
+
+.empty-files small {
+  font-size: 12px;
+  color: #999;
+}
+
+/* File Item */
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: white;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  transition: all 0.2s;
+}
+
+.file-item:hover {
+  border-color: #667eea;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+  transform: translateX(-2px);
+}
+
+.file-icon-wrapper {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.file-info-wrapper {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-name-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size-text {
+  font-size: 11px;
+  color: #999;
+}
+
+.file-download-btn {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.file-download-btn:hover {
+  background: #5568d3;
+  transform: scale(1.1);
+}
+
+/* Files Sidebar Overlay (mobile) */
+.files-sidebar-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999;
+}
+
+/* Attach button next to input */
+.attach-btn {
+  background: #f0f0f0;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 20px;
+  transition: all 0.2s;
+  margin-right: 8px;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: scale(1.05);
+}
+
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Attached files preview above input */
+.attached-files-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.attached-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.attached-file-item button {
+  background: none;
+  border: none;
+  color: #ff4444;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.attached-file-item button:hover {
+  color: #cc0000;
+}
+
+/* Message attachments display */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  font-size: 12px;
+  color: #555;
+}
+
+.user-row .attachment-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+/* Update input wrapper to accommodate attach button */
+.input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.input-wrapper textarea {
+  flex: 1;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  .files-sidebar {
+    width: 280px;
+  }
+}
+
+@media (max-width: 768px) {
+  .files-sidebar {
+    width: 100%;
+    max-width: 320px;
+  }
+
+  .attached-files-preview {
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .attach-btn {
+    padding: 8px 12px;
+    font-size: 18px;
+  }
+
+  .csv-upload-btn {
+    padding: 8px 12px;
+    font-size: 18px;
+  }
+
+  .files-toggle-btn {
+    font-size: 13px;
+    padding: 6px 12px;
+  }
+
+  .header-status {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .files-toggle-btn span {
+    display: none;
+  }
+
+  .files-toggle-btn::after {
+    content: '📁';
+  }
+}

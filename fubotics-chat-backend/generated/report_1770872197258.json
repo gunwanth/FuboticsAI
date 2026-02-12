@@ -1,0 +1,31 @@
+{
+  "columns": [
+    "",
+    "Content ID",
+    "Type",
+    "Category"
+  ],
+  "stats": {
+    "": {
+      "count": 1000,
+      "mean": "499.50",
+      "median": "499.50"
+    },
+    "Content ID": {
+      "count": 1000,
+      "mean": "Infinity",
+      "median": "50472.00"
+    },
+    "Type": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    },
+    "Category": {
+      "count": 0,
+      "mean": "N/A",
+      "median": "N/A"
+    }
+  },
+  "rowCount": 1000
+}

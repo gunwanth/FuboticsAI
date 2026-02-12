@@ -12,12 +12,14 @@ export default function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth > 768);
+  const [filesSidebarVisible, setFilesSidebarVisible] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const chatWindowRef = useRef(null);
   const [dataAnalytics, setDataAnalytics] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
+  const [sessionAttachments, setSessionAttachments] = useState([]);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -148,9 +150,16 @@ export default function App() {
         params: { sessionId },
       });
       setMessages(res.data.messages || []);
+      
+      // Fetch session attachments
+      const attRes = await axios.get(`${API_BASE}/api/attachments`, {
+        params: { sessionId },
+      });
+      setSessionAttachments(attRes.data.attachments || []);
     } catch (err) {
       console.error("Error loading messages", err);
       setMessages([]);
+      setSessionAttachments([]);
     }
   }
 
@@ -317,15 +326,27 @@ export default function App() {
   async function handleFileUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
+    
+    if (!selectedSessionId) {
+      alert("Please create a chat first");
+      return;
+    }
 
     setUploading(true);
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('sessionId', selectedSessionId);
 
     try {
       const response = await axios.post(`${API_BASE}/api/upload-data`, formData);
-      setDataAnalytics(response.data);
-      alert('File processed successfully!');
+      
+      // Refresh session attachments to show new generated files
+      const attRes = await axios.get(`${API_BASE}/api/attachments`, {
+        params: { sessionId: selectedSessionId },
+      });
+      setSessionAttachments(attRes.data.attachments || []);
+      
+      alert('File processed successfully! Check the Generated Files section below.');
     } catch (error) {
       console.error('Upload error:', error);
       alert('Failed to upload and process file: ' + (error.response?.data?.error || error.message));
@@ -354,11 +375,31 @@ export default function App() {
     }
   }
 
+  async function handleDownloadAttachment(attachmentId, filename) {
+    try {
+      const response = await axios.get(`${API_BASE}/api/download-attachment/${attachmentId}`, {
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Download error:', error);
+      alert('Failed to download file');
+    }
+  }
+
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
     fetchMessages(sessionId);
     setAttachedFiles([]);
     setPendingAttachmentIds([]);
+    setDataAnalytics(null);
     
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
@@ -642,7 +683,7 @@ export default function App() {
           <div className="sidebar-overlay" onClick={() => setSidebarVisible(false)} />
         )}
 
-        <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''}`} onClick={handleChatAreaClick}>
+        <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''} ${filesSidebarVisible ? 'files-open' : ''}`} onClick={handleChatAreaClick}>
           <button 
             className="toggle-sidebar-btn" 
             onClick={(e) => {
@@ -662,9 +703,18 @@ export default function App() {
                 <div className="header-icon">AI</div>
                 <h1>Fubotics AI</h1>
               </div>
-              <div className="header-status">
-                <span className="status-dot"></span>
-                <span className="status-text">Online</span>
+              <div className="header-actions">
+                <button 
+                  className="files-toggle-btn"
+                  onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
+                  title="Toggle Files"
+                >
+                  📁 Files
+                </button>
+                <div className="header-status">
+                  <span className="status-dot"></span>
+                  <span className="status-text">Online</span>
+                </div>
               </div>
             </header>
 
@@ -768,6 +818,22 @@ export default function App() {
                   onKeyDown={handleKeyDown}
                   rows={1}
                 />
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={handleFileUpload}
+                  style={{ display: 'none' }}
+                  id="csv-upload-input"
+                  disabled={uploading}
+                />
+                <button
+                  className="csv-upload-btn"
+                  onClick={() => document.getElementById('csv-upload-input').click()}
+                  disabled={uploading || !selectedSessionId}
+                  title="Upload CSV for Analytics"
+                >
+                  📊
+                </button>
                 <button
                   className="send-btn"
                   onClick={handleSend}
@@ -777,44 +843,106 @@ export default function App() {
                 </button>
               </div>
             </div>
+          </div>
 
-            <div className="data-analytics-section">
-              <div className="upload-area">
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileUpload}
-                  style={{ display: 'none' }}
-                  id="file-upload"
-                  disabled={uploading}
-                />
-                <button 
-                  onClick={() => document.getElementById('file-upload').click()}
-                  className="analytics-upload-btn"
-                  disabled={uploading}
-                >
-                  {uploading ? 'Processing...' : 'CSV + '}
-                </button>
-              </div>
+          {/* FILES SIDEBAR */}
+          <aside className={`files-sidebar ${filesSidebarVisible ? 'visible' : 'hidden'}`}>
+            <div className="files-sidebar-header">
+              <h2>📁 Files</h2>
+              <button 
+                className="close-files-btn"
+                onClick={() => setFilesSidebarVisible(false)}
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
 
-              {dataAnalytics && (
-                <div className="analytics-results">
-                  <h3>Data Analytics Results</h3>
-                  <p><strong>Columns:</strong> {dataAnalytics.structure.columns.join(', ')}</p>
-                  <p><strong>Rows:</strong> {dataAnalytics.structure.rowCount}</p>
-
-                  <div className="download-buttons">
-                    <button onClick={() => handleDownload(dataAnalytics.cleanedFile)}>
-                      Download Cleaned CSV
-                    </button>
-                    <button onClick={() => handleDownload(dataAnalytics.reportFile)}>
-                      Download JSON Report
-                    </button>
-                  </div>
+            <div className="files-content">
+              {!selectedSessionId ? (
+                <div className="no-session-message">
+                  <p>Select a chat to view files</p>
                 </div>
+              ) : (
+                <>
+                  {/* Generated Files Section */}
+                  <div className="file-category">
+                    <h3 className="category-title">📊 Generated Files</h3>
+                    <div className="files-list">
+                      {sessionAttachments.filter(att => att.is_generated).length === 0 ? (
+                        <div className="empty-files">
+                          <p>No generated files yet</p>
+                          <small>Upload a CSV to generate analytics</small>
+                        </div>
+                      ) : (
+                        sessionAttachments
+                          .filter(att => att.is_generated)
+                          .map((attachment) => (
+                            <div key={attachment.id} className="file-item">
+                              <div className="file-icon-wrapper">
+                                {attachment.file_type === 'text/csv' ? '📊' : '📄'}
+                              </div>
+                              <div className="file-info-wrapper">
+                                <div className="file-name-text">{attachment.original_filename}</div>
+                                <div className="file-size-text">
+                                  {(attachment.file_size / 1024).toFixed(1)} KB
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
+                                className="file-download-btn"
+                                title="Download"
+                              >
+                                ⬇️
+                              </button>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Uploaded Files Section */}
+                  <div className="file-category">
+                    <h3 className="category-title">📎 Uploaded Files</h3>
+                    <div className="files-list">
+                      {sessionAttachments.filter(att => !att.is_generated).length === 0 ? (
+                        <div className="empty-files">
+                          <p>No uploaded files</p>
+                          <small>Use the 📎 button to attach files</small>
+                        </div>
+                      ) : (
+                        sessionAttachments
+                          .filter(att => !att.is_generated)
+                          .map((attachment) => (
+                            <div key={attachment.id} className="file-item">
+                              <div className="file-icon-wrapper">📎</div>
+                              <div className="file-info-wrapper">
+                                <div className="file-name-text">{attachment.original_filename}</div>
+                                <div className="file-size-text">
+                                  {(attachment.file_size / 1024).toFixed(1)} KB
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
+                                className="file-download-btn"
+                                title="Download"
+                              >
+                                ⬇️
+                              </button>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                </>
               )}
             </div>
-          </div>
+          </aside>
+
+          {/* Overlay for files sidebar on mobile */}
+          {filesSidebarVisible && window.innerWidth <= 768 && (
+            <div className="files-sidebar-overlay" onClick={() => setFilesSidebarVisible(false)} />
+          )}
         </main>
       </div>
       )}

@@ -144,10 +144,17 @@ db.serialize(() => {
       file_type TEXT,
       file_size INTEGER,
       analysis_result TEXT,
+      is_generated BOOLEAN DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (session_id) REFERENCES sessions(id)
     )
   `);
+
+  db.run(`ALTER TABLE attachments ADD COLUMN is_generated BOOLEAN DEFAULT 0`, (err) => {
+    if (err && !err.message.includes('duplicate column name')) {
+      console.error('Error adding is_generated column:', err.message);
+    }
+  });
 
   db.run(`
     CREATE TABLE IF NOT EXISTS message_attachments (
@@ -247,11 +254,11 @@ function getMessagesBySession(sessionId) {
   });
 }
 
-function insertAttachment(sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult = null) {
+function insertAttachment(sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult = null, isGenerated = false) {
   return new Promise((resolve, reject) => {
     db.run(
-      "INSERT INTO attachments (session_id, filename, original_filename, file_path, file_type, file_size, analysis_result) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult],
+      "INSERT INTO attachments (session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult, isGenerated ? 1 : 0],
       function (err) {
         if (err) return reject(err);
         resolve(this.lastID);
@@ -607,6 +614,9 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+
     const filePath = req.file.path;
     const data = [];
     const columns = new Set();
@@ -636,7 +646,31 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
 
           const reportFile = `report_${timestamp}.json`;
           const reportPath = path.join(generatedDir, reportFile);
-          fs.writeFileSync(reportPath, JSON.stringify({ columns: colArray, stats, rowCount: cleanedData.length }, null, 2));
+          const reportContent = { columns: colArray, stats, rowCount: cleanedData.length };
+          fs.writeFileSync(reportPath, JSON.stringify(reportContent, null, 2));
+
+          // Save generated files as attachments linked to this session
+          const cleanedAttachmentId = await insertAttachment(
+            sessionId,
+            cleanedFile,
+            `Cleaned_${req.file.originalname}`,
+            cleanedPath,
+            'text/csv',
+            fs.statSync(cleanedPath).size,
+            JSON.stringify({ type: 'cleaned_csv', originalFile: req.file.originalname }),
+            true // is_generated
+          );
+
+          const reportAttachmentId = await insertAttachment(
+            sessionId,
+            reportFile,
+            `Report_${req.file.originalname.replace('.csv', '.json')}`,
+            reportPath,
+            'application/json',
+            fs.statSync(reportPath).size,
+            JSON.stringify({ type: 'analysis_report', stats, rowCount: cleanedData.length }),
+            true // is_generated
+          );
 
           fs.unlinkSync(filePath);
 
@@ -644,6 +678,8 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
             message: "Data processed successfully",
             cleanedFile,
             reportFile,
+            cleanedAttachmentId,
+            reportAttachmentId,
             structure: { columns: colArray, rowCount: cleanedData.length }
           });
         } catch (err) {
@@ -675,6 +711,38 @@ app.get("/api/download/:filename", authMiddleware, (req, res) => {
       res.status(500).json({ error: "Failed to download file" });
     }
   });
+});
+
+// Download attachment by ID
+app.get("/api/download-attachment/:id", authMiddleware, async (req, res) => {
+  try {
+    const attachmentId = parseInt(req.params.id, 10);
+    
+    const attachment = await new Promise((resolve, reject) => {
+      db.get("SELECT * FROM attachments WHERE id = ?", [attachmentId], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!attachment) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+
+    if (!fs.existsSync(attachment.file_path)) {
+      return res.status(404).json({ error: "File not found on disk" });
+    }
+
+    res.download(attachment.file_path, attachment.original_filename, (err) => {
+      if (err) {
+        console.error("Download error:", err);
+        res.status(500).json({ error: "Failed to download file" });
+      }
+    });
+  } catch (err) {
+    console.error("GET /api/download-attachment error:", err);
+    res.status(500).json({ error: "Failed to download attachment" });
+  }
 });
 
 function cleanData(data, columns) {
