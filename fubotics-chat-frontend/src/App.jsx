@@ -788,9 +788,13 @@ export default function App() {
                   id="file-upload"
                   disabled={uploading}
                 />
-                <label htmlFor="file-upload" className={`upload-btn ${uploading ? 'disabled' : ''}`}>
-                  {uploading ? 'Processing...' : 'Upload CSV for Data Analytics'}
-                </label>
+                <button 
+                  onClick={() => document.getElementById('file-upload').click()}
+                  className="analytics-upload-btn"
+                  disabled={uploading}
+                >
+                  {uploading ? 'Processing...' : 'CSV + '}
+                </button>
               </div>
 
               {dataAnalytics && (

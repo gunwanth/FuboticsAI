@@ -1007,3 +1007,140 @@ body {
     font-size: 18px;
   }
 }
+/* Additional styles for file attachments - Add these to your App.css */
+
+/* Attach button next to input */
+.attach-btn {
+  background: #f0f0f0;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 20px;
+  transition: all 0.2s;
+  margin-right: 8px;
+}
+
+.attach-btn:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: scale(1.05);
+}
+
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Analytics upload button */
+.analytics-upload-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 500;
+  transition: all 0.3s;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+.analytics-upload-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+}
+
+.analytics-upload-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Attached files preview above input */
+.attached-files-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.attached-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.attached-file-item button {
+  background: none;
+  border: none;
+  color: #ff4444;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.attached-file-item button:hover {
+  color: #cc0000;
+}
+
+/* Message attachments display */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  font-size: 12px;
+  color: #555;
+}
+
+.user-row .attachment-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+/* Update input wrapper to accommodate attach button */
+.input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.input-wrapper textarea {
+  flex: 1;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .attached-files-preview {
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .attach-btn {
+    padding: 8px 12px;
+    font-size: 18px;
+  }
+  
+  .analytics-upload-btn {
+    width: 100%;
+    padding: 10px 20px;
+    font-size: 14px;
+  }
+}
