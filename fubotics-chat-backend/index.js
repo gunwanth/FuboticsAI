@@ -125,7 +125,12 @@ async function initializeApp() {
     await db.initializeDatabase();
     console.log("✅ PostgreSQL database initialized");
   } catch (err) {
-    console.error("❌ Failed to initialize database:", err.message);
+    console.error("❌ Failed to initialize database:", {
+      message: err?.message,
+      code: err?.code,
+      detail: err?.detail,
+      hint: err?.hint,
+    });
     process.exit(1);
   }
 }

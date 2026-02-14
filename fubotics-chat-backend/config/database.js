@@ -1,13 +1,22 @@
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 
+const useConnectionString = !!process.env.DATABASE_URL;
+const sslMode = (process.env.PGSSLMODE || "").toLowerCase();
+const requireSsl =
+  process.env.PGSSL === "true" ||
+  sslMode === "require" ||
+  (!!process.env.DATABASE_URL && process.env.NODE_ENV === "production");
+
 module.exports = {
   // PostgreSQL connection configuration
   postgres: {
+    connectionString: useConnectionString ? process.env.DATABASE_URL : undefined,
     host: process.env.PGHOST || "localhost",
     port: process.env.PGPORT || 5432,
     database: process.env.PGDATABASE || "fubotics",
     user: process.env.PGUSER || "postgres",
     password: process.env.PGPASSWORD || "postgres",
+    ssl: requireSsl ? { rejectUnauthorized: false } : false,
     max: process.env.PGMAX || 20,
     idleTimeoutMillis: process.env.PGIDLETIMEOUT || 30000,
     connectionTimeoutMillis: process.env.PGCONNECTIONTIMEOUT || 2000,
