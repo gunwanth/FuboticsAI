@@ -1,67 +1,67 @@
 # Fubotics Chat Backend
 
-A Node.js/Express backend for the Fubotics AI Chat application. This server handles chat session management, message persistence, and OpenAI API integration.
+Express backend for Fubotics AI chat with PostgreSQL persistence, per-user session logs, and refresh-token based authentication.
 
-## Features
+## What this backend now provides
 
-- **Session Management**: Create, retrieve, and delete chat sessions
-- **Message History**: Store and retrieve chat messages from SQLite database
-- **AI Integration**: OpenAI API integration for intelligent responses
-- **CORS Enabled**: Cross-origin requests support for frontend communication
+- PostgreSQL storage for users, chat sessions, messages, attachments, auth tokens, and session logs
+- Persistent chat/session history across restarts and browser closes
+- Rotating refresh tokens stored server-side (token hashes only)
+- Session activity audit trail (`login`, `token_refresh`, `logout`, `logout_all`)
+- User-isolated chat/session access checks on message and file APIs
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
-- npm or yarn
-- OpenAI API key
+- Node.js 18+
+- PostgreSQL running locally or remotely
+- Groq API key (optional for AI responses)
 
-## Installation
+## Setup
 
-1. Clone the repository:
-```bash
-cd fubotics-chat-backend
-```
+1. Install dependencies
 
-2. Install dependencies:
 ```bash
 npm install
 ```
 
-3. Create a `.env` file in the root directory:
-```
-OPENAI_API_KEY=your_api_key_here
+2. Configure env vars (copy from `.env.example`)
+
+```env
 PORT=5000
+PGHOST=localhost
+PGPORT=5432
+PGDATABASE=fubotics
+PGUSER=postgres
+PGPASSWORD=your_postgres_password
+JWT_SECRET=replace_with_a_long_random_secret
+FRONTEND_ORIGINS=http://localhost:5173
+GROQ_API_KEY=your_groq_api_key
 ```
 
-## Scripts
+3. Start server
 
-- `npm start` - Start the production server
-- `npm run dev` - Start development server with hot reload (nodemon)
+```bash
+npm run dev
+```
 
-## API Endpoints
+On startup, schema bootstrap runs automatically from `database/schema.sql`.
 
-### Sessions
-- `GET /api/sessions` - Retrieve all chat sessions
-- `POST /api/sessions` - Create a new chat session
-- `DELETE /api/sessions/:id` - Delete a chat session
+## Auth/session behavior
 
-### Messages
-- `GET /api/messages?sessionId=<id>` - Retrieve messages for a session
-- `POST /api/messages` - Send a message and get AI response
+- `POST /api/login` and `POST /api/signup` return `accessToken` and set an `httpOnly` refresh-token cookie.
+- `POST /api/refresh` rotates refresh token and returns a fresh `accessToken`.
+- `POST /api/logout` revokes the current refresh token and clears cookie.
+- `POST /api/logout-all` revokes all refresh tokens for the user.
+- `GET /api/session-logs` returns session history and currently active token sessions.
 
-## Environment Variables
+## Core API
 
-- `OPENAI_API_KEY` - Your OpenAI API key
-- `PORT` - Server port (default: 5000)
-
-## Database
-
-Uses SQLite3 for persistent storage of sessions and messages.
-
-## Technology Stack
-
-- Express.js - Web framework
-- SQLite3 - Database
-- OpenAI - AI API
-- CORS - Cross-origin resource sharing
-- Dotenv - Environment configuration
+- `GET /api/sessions`
+- `POST /api/sessions`
+- `DELETE /api/sessions/:id`
+- `GET /api/messages?sessionId=<id>`
+- `POST /api/messages`
+- `POST /api/attachments`
+- `GET /api/attachments?sessionId=<id>`
+- `POST /api/upload-data`
+- `GET /api/download-attachment/:id`

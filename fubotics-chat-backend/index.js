@@ -1,15 +1,30 @@
-require("dotenv").config();
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
-const sqlite3 = require("sqlite3").verbose();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
 const Groq = require("groq-sdk");
 const multer = require("multer");
 const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
+const zlib = require("zlib");
+const axios = require("axios");
+const cheerio = require("cheerio");
+const pdfParse = require("pdf-parse");
+const mammoth = require("mammoth");
+const XLSX = require("xlsx");
+const PDFDocument = require("pdfkit");
+const PptxGenJS = require("pptxgenjs");
+const { Document, Packer, Paragraph, HeadingLevel } = require("docx");
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+
+// Import configurations and modules
+const db = require("./db");
+const { authMiddleware } = require("./middleware/auth");
+const authController = require("./controllers/authController");
+const chatSessionModel = require("./models/chatSession");
+const messageModel = require("./models/message");
+const attachmentModel = require("./models/attachment");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -28,6 +43,9 @@ const envList = process.env.FRONTEND_ORIGINS
 const ALLOWED_ORIGINS = Array.from(new Set([...envList, ...defaultOrigins]));
 
 app.use(express.json());
+
+// Cookie parser for refresh tokens
+app.use(cookieParser());
 
 // ---------- MULTER SETUP ----------
 const uploadDir = path.join(__dirname, 'uploads');
@@ -59,10 +77,12 @@ const chatUpload = multer({
       'text/csv', 'text/plain', 'application/json',
       'application/pdf', 'image/png', 'image/jpeg', 
       'application/vnd.ms-excel', 
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation'
     ];
     if (allowedTypes.includes(file.mimetype) || 
-        ['.csv', '.txt', '.json', '.pdf', '.png', '.jpg', '.jpeg', '.xls', '.xlsx'].includes(path.extname(file.originalname).toLowerCase())) {
+        ['.csv', '.txt', '.json', '.pdf', '.png', '.jpg', '.jpeg', '.xls', '.xlsx', '.docx', '.pptx'].includes(path.extname(file.originalname).toLowerCase())) {
       cb(null, true);
     } else {
       cb(new Error('File type not allowed'));
@@ -77,8 +97,9 @@ app.use(cors({
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
     return callback(new Error("CORS origin denied: " + origin));
   },
-  methods: ["GET", "POST", "OPTIONS", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  methods: ["GET", "POST", "PUT", "OPTIONS", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true
 }));
 
 app.use((req, res, next) => {
@@ -86,8 +107,9 @@ app.use((req, res, next) => {
     const origin = req.headers.origin || "";
     if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       res.header("Access-Control-Allow-Origin", origin || "*");
-      res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS,DELETE");
+      res.header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS,DELETE");
       res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+      res.header("Access-Control-Allow-Credentials", "true");
       return res.sendStatus(200);
     }
     return res.status(403).send("CORS origin denied");
@@ -95,253 +117,25 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- DB SETUP ----------
-const db = new sqlite3.Database("./chat.db");
-
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      user_id INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-  `);
-
-  db.run(`ALTER TABLE sessions ADD COLUMN user_id INTEGER REFERENCES users(id)`, (err) => {
-    if (err && !err.message.includes('duplicate column name')) {
-      console.error('Error adding user_id column:', err.message);
-    }
-  });
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      session_id INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE,
-      password_hash TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS attachments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id INTEGER NOT NULL,
-      filename TEXT NOT NULL,
-      original_filename TEXT NOT NULL,
-      file_path TEXT NOT NULL,
-      file_type TEXT,
-      file_size INTEGER,
-      analysis_result TEXT,
-      is_generated BOOLEAN DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (session_id) REFERENCES sessions(id)
-    )
-  `);
-
-  db.run(`ALTER TABLE attachments ADD COLUMN is_generated BOOLEAN DEFAULT 0`, (err) => {
-    if (err && !err.message.includes('duplicate column name')) {
-      console.error('Error adding is_generated column:', err.message);
-    }
-  });
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS message_attachments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      message_id INTEGER NOT NULL,
-      attachment_id INTEGER NOT NULL,
-      FOREIGN KEY (message_id) REFERENCES messages(id),
-      FOREIGN KEY (attachment_id) REFERENCES attachments(id)
-    )
-  `);
-
-  console.log("✅ SQLite ready (chat.db)");
-});
-
-// ---------- DB HELPERS ----------
-function createSession(name = null, userId = null) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "INSERT INTO sessions (name, user_id) VALUES (?, ?)",
-      [name, userId],
-      function (err) {
-        if (err) return reject(err);
-        resolve({ id: this.lastID, name, user_id: userId, created_at: new Date().toISOString() });
-      }
-    );
-  });
-}
-
-function getSessions(userId) {
-  return new Promise((resolve, reject) => {
-    db.all(
-      "SELECT id, name, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
-      [userId],
-      (err, rows) => {
-        if (err) return reject(err);
-        resolve(rows);
-      }
-    );
-  });
-}
-
-function deleteSession(sessionId) {
-  return new Promise((resolve, reject) => {
-    db.serialize(() => {
-      db.run("DELETE FROM message_attachments WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)", [sessionId]);
-      db.run("DELETE FROM messages WHERE session_id = ?", [sessionId]);
-      db.run("DELETE FROM attachments WHERE session_id = ?", [sessionId]);
-      db.run("DELETE FROM sessions WHERE id = ?", [sessionId], (err) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
-  });
-}
-
-function insertMessage(sessionId, role, content) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-      [sessionId, role, content],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.lastID);
-      }
-    );
-  });
-}
-
-function getMessagesBySession(sessionId) {
-  return new Promise((resolve, reject) => {
-    db.all(
-      `SELECT m.id, m.role, m.content, m.created_at,
-              GROUP_CONCAT(a.id) as attachment_ids,
-              GROUP_CONCAT(a.original_filename) as attachment_names
-       FROM messages m
-       LEFT JOIN message_attachments ma ON m.id = ma.message_id
-       LEFT JOIN attachments a ON ma.attachment_id = a.id
-       WHERE m.session_id = ?
-       GROUP BY m.id
-       ORDER BY m.id ASC`,
-      [sessionId],
-      (err, rows) => {
-        if (err) return reject(err);
-        const messages = rows.map(row => ({
-          id: row.id,
-          role: row.role,
-          content: row.content,
-          created_at: row.created_at,
-          attachments: row.attachment_ids ? row.attachment_ids.split(',').map((id, idx) => ({
-            id: parseInt(id),
-            filename: row.attachment_names.split(',')[idx]
-          })) : []
-        }));
-        resolve(messages);
-      }
-    );
-  });
-}
-
-function insertAttachment(sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult = null, isGenerated = false) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "INSERT INTO attachments (session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult, isGenerated ? 1 : 0],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.lastID);
-      }
-    );
-  });
-}
-
-function linkMessageAttachment(messageId, attachmentId) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "INSERT INTO message_attachments (message_id, attachment_id) VALUES (?, ?)",
-      [messageId, attachmentId],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.lastID);
-      }
-    );
-  });
-}
-
-function getAttachmentsBySession(sessionId) {
-  return new Promise((resolve, reject) => {
-    db.all(
-      "SELECT * FROM attachments WHERE session_id = ? ORDER BY created_at DESC",
-      [sessionId],
-      (err, rows) => {
-        if (err) return reject(err);
-        resolve(rows);
-      }
-    );
-  });
-}
-
-// ---------- USERS / AUTH HELPERS ----------
-const JWT_SECRET = process.env.JWT_SECRET || "please_change_this_secret";
-
-function createUser(username, password) {
-  return new Promise((resolve, reject) => {
-    const pwHash = bcrypt.hashSync(password, 10);
-    db.run(
-      "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-      [username, pwHash],
-      function (err) {
-        if (err) return reject(err);
-        resolve({ id: this.lastID, username });
-      }
-    );
-  });
-}
-
-function findUserByUsername(username) {
-  return new Promise((resolve, reject) => {
-    db.get("SELECT id, username, password_hash FROM users WHERE username = ?", [username], (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
-}
-
-function signToken(user) {
-  return jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "7d" });
-}
-
-function authMiddleware(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) return res.status(401).json({ error: "Missing token" });
-  const token = auth.split(" ")[1];
+// ---------- DATABASE INITIALIZATION ----------
+// Initialize PostgreSQL database
+async function initializeApp() {
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
-    next();
+    // Initialize database schema
+    await db.initializeDatabase();
+    console.log("✅ PostgreSQL database initialized");
   } catch (err) {
-    return res.status(401).json({ error: "Invalid token" });
+    console.error("❌ Failed to initialize database:", err.message);
+    process.exit(1);
   }
 }
 
 // ---------- FILE ANALYSIS HELPERS ----------
 async function analyzeFile(filePath, fileType, originalFilename) {
   try {
-    let content = '';
+    const lowerName = (originalFilename || "").toLowerCase();
     
-    if (fileType === 'text/csv' || originalFilename.endsWith('.csv')) {
+    if (fileType === 'text/csv' || lowerName.endsWith('.csv')) {
       const rows = [];
       return new Promise((resolve, reject) => {
         fs.createReadStream(filePath)
@@ -359,12 +153,45 @@ async function analyzeFile(filePath, fileType, originalFilename) {
           })
           .on('error', reject);
       });
-    } else if (fileType === 'text/plain' || fileType === 'application/json') {
-      content = fs.readFileSync(filePath, 'utf8');
+    } else if (fileType === 'text/plain' || fileType === 'application/json' || lowerName.endsWith(".txt") || lowerName.endsWith(".json")) {
+      const content = fs.readFileSync(filePath, 'utf8');
       return JSON.stringify({
         type: fileType === 'application/json' ? 'json' : 'text',
         preview: content.substring(0, 1000),
         size: content.length
+      });
+    } else if (fileType === "application/pdf" || lowerName.endsWith(".pdf")) {
+      const buffer = fs.readFileSync(filePath);
+      const parsed = await pdfParse(buffer);
+      return JSON.stringify({
+        type: "pdf",
+        pages: parsed.numpages,
+        preview: (parsed.text || "").replace(/\s+/g, " ").trim().substring(0, 1200)
+      });
+    } else if (fileType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || lowerName.endsWith(".docx")) {
+      const extracted = await mammoth.extractRawText({ path: filePath });
+      const text = (extracted.value || "").replace(/\s+/g, " ").trim();
+      return JSON.stringify({
+        type: "docx",
+        preview: text.substring(0, 1200),
+        length: text.length
+      });
+    } else if (
+      fileType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      fileType === "application/vnd.ms-excel" ||
+      lowerName.endsWith(".xlsx") ||
+      lowerName.endsWith(".xls")
+    ) {
+      const workbook = XLSX.readFile(filePath);
+      const firstSheet = workbook.SheetNames[0];
+      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { defval: "" });
+      const columns = rows.length ? Object.keys(rows[0]) : [];
+      return JSON.stringify({
+        type: "spreadsheet",
+        sheet: firstSheet,
+        rows: rows.length,
+        columns,
+        sample: rows.slice(0, 3)
       });
     }
     
@@ -383,8 +210,635 @@ if (!groqKey) {
   console.log("✅ GROQ_API_KEY loaded.");
 }
 const groq = new Groq({ apiKey: groqKey });
+const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
+const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
+const sambaNovaPromptModel = process.env.SAMBANOVA_IMAGE_PROMPT_MODEL || "Meta-Llama-3.3-70B-Instruct";
+const freepikEnabled = String(process.env.ENABLE_FREEPIK || "false").toLowerCase() === "true";
+const freepikApiKey = freepikEnabled ? process.env.FREEPIK_API_KEY || null : null;
+const freepikImageModel = process.env.FREEPIK_IMAGE_MODEL || "flux-pro-v1-1";
+const freepikPollAttempts = Math.min(
+  30,
+  Math.max(3, Number.parseInt(process.env.FREEPIK_POLL_ATTEMPTS || "15", 10))
+);
+const freepikPollIntervalMs = Math.min(
+  5000,
+  Math.max(500, Number.parseInt(process.env.FREEPIK_POLL_INTERVAL_MS || "1200", 10))
+);
+const huggingFaceApiKey = process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
+const huggingFaceImageModel = process.env.HF_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
+const pollinationsBaseUrl = (process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai").replace(/\/$/, "");
+const pollinationsImageModel = process.env.POLLINATIONS_IMAGE_MODEL || "flux";
 
-async function getAIReply(history, sessionAttachments = []) {
+function createFallbackPng(prompt = "") {
+  const width = 768;
+  const height = 768;
+  const rowSize = width * 4 + 1;
+  const raw = Buffer.alloc(rowSize * height);
+  const text = String(prompt || "image");
+  let seed = 0;
+  for (let i = 0; i < text.length; i++) seed = (seed + text.charCodeAt(i) * (i + 1)) >>> 0;
+
+  for (let y = 0; y < height; y++) {
+    const row = y * rowSize;
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const idx = row + 1 + x * 4;
+      const r = Math.floor((x / width) * 160) + 30;
+      const g = Math.floor((y / height) * 140) + 40;
+      const b = ((seed % 150) + 80 + Math.floor((x + y) / 16)) % 256;
+      raw[idx] = r;
+      raw[idx + 1] = g;
+      raw[idx + 2] = b;
+      raw[idx + 3] = 255;
+    }
+  }
+
+  const cx = width / 2;
+  const cy = height / 2;
+  const radius = 180;
+  for (let y = Math.max(0, cy - radius); y < Math.min(height, cy + radius); y++) {
+    for (let x = Math.max(0, cx - radius); x < Math.min(width, cx + radius); x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy <= radius * radius) {
+        const idx = y * rowSize + 1 + x * 4;
+        raw[idx] = 248;
+        raw[idx + 1] = 250;
+        raw[idx + 2] = 252;
+        raw[idx + 3] = 255;
+      }
+    }
+  }
+
+  const crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  const crc32 = (buffer) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buffer.length; i++) c = crcTable[(c ^ buffer[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const typeBuf = Buffer.from(type, "ascii");
+    const lenBuf = Buffer.alloc(4);
+    lenBuf.writeUInt32BE(data.length, 0);
+    const crcBuf = Buffer.alloc(4);
+    crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+    return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
+  };
+
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const idat = zlib.deflateSync(raw, { level: 9 });
+  return Buffer.concat([signature, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
+}
+const deepSearchMaxResults = Math.min(
+  12,
+  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_MAX_RESULTS || "6", 10))
+);
+const deepSearchFetchConcurrency = Math.min(
+  6,
+  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_FETCH_CONCURRENCY || "3", 10))
+);
+const deepSearchSnippetChars = Math.min(
+  1800,
+  Math.max(300, Number.parseInt(process.env.DEEP_SEARCH_SNIPPET_CHARS || "900", 10))
+);
+const deepSearchSearchTimeoutMs = Math.min(
+  20000,
+  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_SEARCH_TIMEOUT_MS || "12000", 10))
+);
+const deepSearchPageTimeoutMs = Math.min(
+  20000,
+  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_PAGE_TIMEOUT_MS || "10000", 10))
+);
+const aiDefaultMaxTokens = Math.min(
+  4096,
+  Math.max(512, Number.parseInt(process.env.AI_MAX_TOKENS || "2048", 10))
+);
+const aiDeepSearchMaxTokens = Math.min(
+  4096,
+  Math.max(aiDefaultMaxTokens, Number.parseInt(process.env.AI_DEEP_SEARCH_MAX_TOKENS || "3072", 10))
+);
+
+async function generateNarrative(prompt, style = "document") {
+  const contentPrompt = `Create a high quality ${style} based on this request:\n${prompt}\n\nReturn only final content (no meta commentary).`;
+  const response = await groq.chat.completions.create({
+    model: "llama-3.3-70b-versatile",
+    messages: [
+      { role: "system", content: "You are a professional content generator." },
+      { role: "user", content: contentPrompt },
+    ],
+    max_tokens: 2500,
+    temperature: 0.6,
+  });
+  return response.choices?.[0]?.message?.content?.trim() || prompt;
+}
+
+function renderAttachmentInsight(analysis) {
+  if (!analysis || typeof analysis !== "object") return "";
+  if (analysis.type === "csv") {
+    return `CSV with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}`;
+  }
+  if (analysis.type === "spreadsheet") {
+    return `Spreadsheet (${analysis.sheet || "sheet"}) with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}. Sample: ${JSON.stringify(analysis.sample || []).substring(0, 600)}`;
+  }
+  if (analysis.type === "pdf") {
+    return `PDF with ${analysis.pages || "unknown"} pages. Extracted text: ${(analysis.preview || "").substring(0, 1200)}`;
+  }
+  if (analysis.type === "docx") {
+    return `DOCX extracted text: ${(analysis.preview || "").substring(0, 1200)}`;
+  }
+  if (analysis.type === "json" || analysis.type === "text") {
+    return `${analysis.type.toUpperCase()} preview: ${(analysis.preview || "").substring(0, 1200)}`;
+  }
+  if (analysis.preview) return String(analysis.preview).substring(0, 1200);
+  if (analysis.sample) return `Sample data: ${JSON.stringify(analysis.sample).substring(0, 700)}`;
+  return "";
+}
+
+async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
+  const normalizeResultUrl = (rawUrl) => {
+    if (!rawUrl) return null;
+    let candidate = String(rawUrl).trim();
+    if (!candidate) return null;
+
+    if (candidate.startsWith("//")) {
+      candidate = `https:${candidate}`;
+    } else if (candidate.startsWith("/")) {
+      candidate = `https://duckduckgo.com${candidate}`;
+    }
+
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.hostname.includes("duckduckgo.com") && parsed.pathname.startsWith("/l/")) {
+        const target = parsed.searchParams.get("uddg");
+        if (target) return decodeURIComponent(target);
+      }
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        return parsed.toString();
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  try {
+    const targetResults = Math.min(12, Math.max(1, Number.parseInt(String(maxResults), 10) || deepSearchMaxResults));
+    const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const { data } = await axios.get(searchUrl, {
+      timeout: deepSearchSearchTimeoutMs,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      },
+    });
+    const $ = cheerio.load(data);
+    const rawResults = [];
+    $("a.result__a").each((_, el) => {
+      const title = $(el).text().trim();
+      const href = $(el).attr("href");
+      const normalized = normalizeResultUrl(href);
+      if (title && normalized) rawResults.push({ title, url: normalized });
+    });
+
+    const unique = [];
+    const seenDomainCount = new Map();
+    const seen = new Set();
+    for (const item of rawResults) {
+      if (!seen.has(item.url)) {
+        seen.add(item.url);
+        let hostname = "";
+        try {
+          hostname = new URL(item.url).hostname;
+        } catch (_) {
+          hostname = "";
+        }
+        const domainHits = seenDomainCount.get(hostname) || 0;
+        if (domainHits < 2) {
+          unique.push(item);
+          seenDomainCount.set(hostname, domainHits + 1);
+        }
+      }
+      if (unique.length >= targetResults * 2) break;
+    }
+
+    const fetchSourceSnippet = async (item) => {
+      try {
+        const page = await axios.get(item.url, {
+          timeout: deepSearchPageTimeoutMs,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          },
+        });
+        const p$ = cheerio.load(page.data);
+        const content = p$("p")
+          .slice(0, 20)
+          .map((__, p) => p$(p).text().trim())
+          .get()
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .substring(0, deepSearchSnippetChars);
+        return {
+          title: item.title,
+          url: item.url,
+          snippet: content || "No extractable content.",
+        };
+      } catch (_) {
+        return {
+          title: item.title,
+          url: item.url,
+          snippet: "Source fetched but content extraction failed.",
+        };
+      }
+    };
+
+    const enriched = [];
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(deepSearchFetchConcurrency, unique.length) },
+      async () => {
+        while (cursor < unique.length) {
+          const current = unique[cursor++];
+          const fetched = await fetchSourceSnippet(current);
+          enriched.push(fetched);
+        }
+      }
+    );
+    await Promise.all(workers);
+    if (enriched.length > targetResults) {
+      return enriched.slice(0, targetResults);
+    }
+    return enriched;
+  } catch (err) {
+    console.error("Deep search error:", err.message);
+    return [];
+  }
+}
+
+async function generateDocumentFile(sessionId, prompt) {
+  const content = await generateNarrative(prompt, "word document");
+  const filename = `document_${Date.now()}.docx`;
+  const filePath = path.join(generatedDir, filename);
+  const doc = new Document({
+    sections: [
+      {
+        children: [
+          new Paragraph({ text: "Generated Document", heading: HeadingLevel.HEADING_1 }),
+          ...content.split("\n").map((line) => new Paragraph(line || " ")),
+        ],
+      },
+    ],
+  });
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(filePath, buffer);
+  return attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_document", prompt }),
+    true
+  );
+}
+
+async function generatePdfFile(sessionId, prompt) {
+  const content = await generateNarrative(prompt, "pdf report");
+  const filename = `document_${Date.now()}.pdf`;
+  const filePath = path.join(generatedDir, filename);
+  await new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 40 });
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
+    doc.fontSize(18).text("Generated PDF", { underline: true });
+    doc.moveDown();
+    doc.fontSize(12).text(content);
+    doc.moveDown();
+    doc.text(`Generated at: ${new Date().toISOString()}`);
+    doc.end();
+    stream.on("finish", resolve);
+    stream.on("error", reject);
+  });
+  return attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    "application/pdf",
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_pdf", prompt }),
+    true
+  );
+}
+
+async function generatePptFile(sessionId, prompt) {
+  const content = await generateNarrative(prompt, "presentation with key points");
+  const bullets = content
+    .split("\n")
+    .map((line) => line.replace(/^[-*\d.\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const filename = `presentation_${Date.now()}.pptx`;
+  const filePath = path.join(generatedDir, filename);
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+  const slide1 = pptx.addSlide();
+  slide1.addText("Generated Presentation", { x: 0.5, y: 0.5, w: 12, h: 0.8, fontSize: 28, bold: true });
+  slide1.addText(prompt, { x: 0.8, y: 1.6, w: 11.5, h: 1.2, fontSize: 16 });
+  const slide2 = pptx.addSlide();
+  slide2.addText("Summary", { x: 0.5, y: 0.5, w: 12, h: 0.7, fontSize: 24, bold: true });
+  slide2.addText(
+    bullets.map((b) => ({ text: b, options: { bullet: { indent: 16 } } })),
+    { x: 0.8, y: 1.5, w: 11, h: 4.5, fontSize: 16 }
+  );
+  await pptx.writeFile({ fileName: filePath });
+  return attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_ppt", prompt }),
+    true
+  );
+}
+
+async function buildImagePromptWithSamba(userPrompt) {
+  if (!sambaNovaApiKey) {
+    return userPrompt;
+  }
+  try {
+    const resp = await axios.post(
+      `${sambaNovaBaseUrl}/chat/completions`,
+      {
+        model: sambaNovaPromptModel,
+        temperature: 0.4,
+        max_tokens: 500,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an expert prompt engineer for text-to-image models. Return one detailed visual prompt only.",
+          },
+          {
+            role: "user",
+            content: `Create a production-grade text-to-image prompt for: ${userPrompt}`,
+          },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${sambaNovaApiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 60000,
+      }
+    );
+    return resp.data?.choices?.[0]?.message?.content?.trim() || userPrompt;
+  } catch (err) {
+    console.error("SambaNova prompt generation failed, using raw prompt:", err.message);
+    return userPrompt;
+  }
+}
+
+async function generateImageFile(sessionId, prompt) {
+  let imageBuffer = null;
+  let imageMime = "image/png";
+  const promptForGenerator = await buildImagePromptWithSamba(prompt);
+
+  async function generateImageWithFreepik(textPrompt) {
+    const baseUrl =
+      freepikImageModel === "mystic"
+        ? "https://api.freepik.com/v1/ai/mystic"
+        : `https://api.freepik.com/v1/ai/text-to-image/${encodeURIComponent(freepikImageModel)}`;
+    const createRes = await axios.post(
+      baseUrl,
+      {
+        prompt: textPrompt,
+        aspect_ratio: "square_1_1",
+        output_format: "png",
+      },
+      {
+        headers: {
+          "x-freepik-api-key": freepikApiKey,
+          "Content-Type": "application/json",
+        },
+        timeout: 60000,
+        validateStatus: () => true,
+      }
+    );
+
+    if (createRes.status >= 400) {
+      throw new Error(`Freepik create task failed (${createRes.status}): ${JSON.stringify(createRes.data).slice(0, 260)}`);
+    }
+
+    const taskId = createRes.data?.data?.task_id;
+    if (!taskId) {
+      throw new Error("Freepik did not return task_id");
+    }
+
+    for (let i = 0; i < freepikPollAttempts; i++) {
+      const pollRes = await axios.get(`${baseUrl}/${taskId}`, {
+        headers: {
+          "x-freepik-api-key": freepikApiKey,
+        },
+        timeout: 45000,
+        validateStatus: () => true,
+      });
+
+      if (pollRes.status >= 400) {
+        throw new Error(`Freepik poll failed (${pollRes.status}): ${JSON.stringify(pollRes.data).slice(0, 260)}`);
+      }
+
+      const payload = pollRes.data?.data || {};
+      const generated = Array.isArray(payload.generated) ? payload.generated : [];
+      if (generated.length > 0 && generated[0]) {
+        const imageUrl = generated[0];
+        const imageRes = await axios.get(imageUrl, {
+          responseType: "arraybuffer",
+          timeout: 60000,
+          validateStatus: () => true,
+        });
+        if (imageRes.status >= 400) {
+          throw new Error(`Freepik image download failed (${imageRes.status})`);
+        }
+        const contentType = imageRes.headers["content-type"] || "image/png";
+        return { buffer: Buffer.from(imageRes.data), mime: contentType };
+      }
+
+      const status = String(payload.status || "").toUpperCase();
+      if (status === "FAILED" || status === "REJECTED" || status === "CANCELLED") {
+        throw new Error(`Freepik task ended with status ${status}`);
+      }
+
+      await new Promise((r) => setTimeout(r, freepikPollIntervalMs));
+    }
+
+    throw new Error("Freepik task timed out");
+  }
+
+  if (!imageBuffer && freepikApiKey) {
+    try {
+      const freepikImage = await generateImageWithFreepik(promptForGenerator);
+      imageBuffer = freepikImage.buffer;
+      imageMime = freepikImage.mime;
+      console.warn("Image generation used Freepik provider.");
+    } catch (err) {
+      console.error("Freepik image generation failed:", err.message);
+    }
+  }
+
+  if (!imageBuffer && huggingFaceApiKey) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const hfRes = await axios.post(
+          `https://router.huggingface.co/hf-inference/models/${encodeURIComponent(huggingFaceImageModel)}`,
+          { inputs: promptForGenerator },
+          {
+            headers: {
+              Authorization: `Bearer ${huggingFaceApiKey}`,
+              "Content-Type": "application/json",
+              Accept: "image/png",
+            },
+            responseType: "arraybuffer",
+            timeout: 90000,
+            validateStatus: () => true,
+          }
+        );
+
+        const contentType = hfRes.headers["content-type"] || "";
+        if (contentType.startsWith("image/")) {
+          imageBuffer = Buffer.from(hfRes.data);
+          imageMime = contentType;
+          break;
+        }
+
+        const bodyText = Buffer.from(hfRes.data).toString("utf8");
+        let payload = {};
+        try {
+          payload = JSON.parse(bodyText);
+        } catch (_) {
+          payload = { error: bodyText.substring(0, 300) };
+        }
+
+        if (payload?.estimated_time) {
+          await new Promise((r) => setTimeout(r, Math.ceil(payload.estimated_time * 1000)));
+          continue;
+        }
+        throw new Error(
+          payload?.error ||
+            payload?.message ||
+            `Hugging Face request failed with status ${hfRes.status}`
+        );
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (!imageBuffer && lastError) {
+      console.error("Hugging Face image generation failed:", lastError.message);
+    }
+  }
+
+  if (!imageBuffer && pollinationsBaseUrl) {
+    try {
+      const pollinationsUrl = `${pollinationsBaseUrl}/prompt/${encodeURIComponent(promptForGenerator)}?model=${encodeURIComponent(pollinationsImageModel)}&width=1024&height=1024&nologo=true`;
+      const pollinationsRes = await axios.get(pollinationsUrl, {
+        responseType: "arraybuffer",
+        timeout: 90000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
+      });
+      imageBuffer = Buffer.from(pollinationsRes.data);
+      imageMime = pollinationsRes.headers["content-type"] || "image/png";
+      console.warn("Image generation used Pollinations fallback provider.");
+    } catch (err) {
+      console.error("Pollinations fallback failed:", err.message);
+    }
+  }
+
+  if (!imageBuffer) {
+    const query = encodeURIComponent((prompt || "art image").slice(0, 180));
+    const webImageCandidates = [
+      `https://source.unsplash.com/1024x1024/?${query}`,
+      `https://loremflickr.com/1024/1024/${query}`,
+    ];
+    for (const candidate of webImageCandidates) {
+      try {
+        const webRes = await axios.get(candidate, {
+          responseType: "arraybuffer",
+          timeout: 45000,
+          maxRedirects: 5,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          validateStatus: () => true,
+        });
+        const ct = (webRes.headers["content-type"] || "").toLowerCase();
+        if (ct.startsWith("image/")) {
+          imageBuffer = Buffer.from(webRes.data);
+          imageMime = ct;
+          console.warn(`Image generation used web-scraped fallback: ${candidate}`);
+          break;
+        }
+      } catch (err) {
+        console.error(`Web image fallback failed for ${candidate}:`, err.message);
+      }
+    }
+  }
+
+  if (!imageBuffer) {
+    imageBuffer = createFallbackPng(prompt);
+    imageMime = "image/png";
+    console.warn("All remote image providers failed. Served local PNG fallback image.");
+  }
+  const ext = imageMime.includes("jpeg")
+    ? "jpg"
+    : imageMime.includes("webp")
+    ? "webp"
+    : "png";
+  const filename = `image_${Date.now()}.${ext}`;
+  const filePath = path.join(generatedDir, filename);
+  fs.writeFileSync(filePath, imageBuffer);
+  return attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    imageMime,
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_image", prompt }),
+    true
+  );
+}
+
+function detectGenerationRequest(content) {
+  const text = (content || "").toLowerCase();
+  if (!text.includes("generate") && !text.includes("create")) return null;
+  if (text.includes("image")) return "image";
+  if (text.includes("ppt") || text.includes("powerpoint") || text.includes("presentation")) return "ppt";
+  if (text.includes("pdf")) return "pdf";
+  if (text.includes("docx") || text.includes("word") || text.includes("doc") || text.includes("document")) return "document";
+  return null;
+}
+
+async function getAIReply(history, sessionAttachments = [], webSources = []) {
   try {
     let systemContent = "You are a helpful assistant.";
     
@@ -395,17 +849,23 @@ async function getAIReply(history, sessionAttachments = []) {
         if (att.analysis_result) {
           try {
             const analysis = JSON.parse(att.analysis_result);
-            if (analysis.type === 'csv') {
-              systemContent += `\n  CSV file with ${analysis.rows} rows and columns: ${analysis.columns.join(', ')}`;
-            } else if (analysis.preview) {
-              systemContent += `\n  Preview: ${analysis.preview.substring(0, 200)}...`;
-            }
+            const insight = renderAttachmentInsight(analysis);
+            if (insight) systemContent += `\n  ${insight}`;
           } catch (e) {
             systemContent += `\n  ${att.analysis_result}`;
           }
         }
       }
       systemContent += "\n\nWhen users ask about these files, reference the information provided above.";
+    }
+
+    if (webSources.length > 0) {
+      systemContent += "\n\nDeep web research sources were collected for this answer. Cite them when useful:\n";
+      for (const source of webSources.slice(0, deepSearchMaxResults)) {
+        const safeSnippet = String(source.snippet || "").replace(/\s+/g, " ").trim().slice(0, deepSearchSnippetChars);
+        systemContent += `\n- ${source.title} (${source.url})\n  Snippet: ${safeSnippet}`;
+      }
+      systemContent += "\n\nUse these sources to provide a research-focused response with factual caution.";
     }
 
     const messages = [
@@ -416,7 +876,7 @@ async function getAIReply(history, sessionAttachments = []) {
     const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages,
-      max_tokens: 2048,
+      max_tokens: webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
       temperature: 0.7,
     });
 
@@ -428,14 +888,27 @@ async function getAIReply(history, sessionAttachments = []) {
 }
 
 // ---------- ROUTES ----------
+
+// Health check
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, allowed_origins: ALLOWED_ORIGINS });
 });
 
+// Auth routes
+app.post("/api/signup", authController.signup);
+app.post("/api/login", authController.login);
+app.post("/api/refresh", authController.refresh);
+app.post("/api/logout", authController.logout);
+app.get("/api/me", authMiddleware, authController.me);
+app.get("/api/session-logs", authMiddleware, authController.getSessionLogs);
+app.post("/api/logout-all", authMiddleware, authController.logoutAll);
+
+// Sessions routes
 app.get("/api/sessions", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
-    res.json({ sessions: await getSessions(userId) });
+    const sessions = await chatSessionModel.getByUserId(userId);
+    res.json({ sessions });
   } catch (err) {
     console.error("GET /api/sessions error:", err);
     res.status(500).json({ error: "Failed to fetch sessions" });
@@ -450,7 +923,7 @@ app.post("/api/sessions", authMiddleware, async (req, res) => {
       if (name === "") name = null;
     }
     const userId = req.user.id;
-    const session = await createSession(name, userId);
+    const session = await chatSessionModel.create(userId, name);
     res.status(201).json({ session });
   } catch (err) {
     console.error("❌ Failed to create session:", err);
@@ -462,20 +935,18 @@ app.delete("/api/sessions/:id", authMiddleware, async (req, res) => {
   try {
     const sessionId = parseInt(req.params.id, 10);
     const userId = req.user.id;
-    const session = await new Promise((resolve, reject) => {
-      db.get("SELECT user_id FROM sessions WHERE id = ?", [sessionId], (err, row) => {
-        if (err) return reject(err);
-        resolve(row);
-      });
-    });
-    if (!session || session.user_id !== userId) {
+    
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(sessionId, userId);
+    if (!session) {
       return res.status(403).json({ error: "Unauthorized to delete this session" });
     }
     
-    const attachments = await getAttachmentsBySession(sessionId);
+    // Get attachments to delete files
+    const attachments = await attachmentModel.getFilePathsBySessionId(sessionId);
     for (const att of attachments) {
       try {
-        if (fs.existsSync(att.file_path)) {
+        if (att.file_path && fs.existsSync(att.file_path)) {
           fs.unlinkSync(att.file_path);
         }
       } catch (err) {
@@ -483,7 +954,8 @@ app.delete("/api/sessions/:id", authMiddleware, async (req, res) => {
       }
     }
     
-    await deleteSession(sessionId);
+    // Delete from database (cascades to messages and attachments)
+    await chatSessionModel.delete(sessionId, userId);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /api/sessions error:", err);
@@ -491,27 +963,255 @@ app.delete("/api/sessions/:id", authMiddleware, async (req, res) => {
   }
 });
 
+// Messages routes
 app.get("/api/messages", authMiddleware, async (req, res) => {
   try {
     const sessionId = parseInt(req.query.sessionId, 10);
-    res.json({ messages: await getMessagesBySession(sessionId) });
+    if (!Number.isInteger(sessionId)) {
+      return res.status(400).json({ error: "Valid sessionId required" });
+    }
+    const session = await chatSessionModel.getById(sessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+    const messages = await messageModel.getBySessionId(sessionId);
+    res.json({ messages });
   } catch (err) {
     console.error("GET /api/messages error:", err);
     res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
 
+app.post("/api/messages", authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, content, attachmentIds, deepSearch } = req.body;
+    const parsedSessionId = Number.parseInt(sessionId, 10);
+    if (!Number.isInteger(parsedSessionId)) {
+      return res.status(400).json({ error: "Valid sessionId required" });
+    }
+    
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(parsedSessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+    
+    const sessionAttachments = await attachmentModel.getBySessionId(parsedSessionId);
+    
+    const messageId = await messageModel.create(parsedSessionId, "user", content);
+    
+    if (attachmentIds && Array.isArray(attachmentIds)) {
+      for (const attId of attachmentIds) {
+        await attachmentModel.linkToMessage(messageId.id, attId);
+      }
+    }
+    
+    const generationType = detectGenerationRequest(content);
+    if (generationType) {
+      let generatedAttachment = null;
+      let generationError = null;
+      try {
+        if (generationType === "image") {
+          generatedAttachment = await generateImageFile(parsedSessionId, content);
+        } else if (generationType === "ppt") {
+          generatedAttachment = await generatePptFile(parsedSessionId, content);
+        } else if (generationType === "pdf") {
+          generatedAttachment = await generatePdfFile(parsedSessionId, content);
+        } else if (generationType === "document") {
+          generatedAttachment = await generateDocumentFile(parsedSessionId, content);
+        }
+      } catch (err) {
+        generationError = err;
+        console.error(`Generation failed for type ${generationType}:`, err.message);
+      }
+
+      const assistantMsg = generatedAttachment
+        ? `Generated ${generationType.toUpperCase()} successfully: ${generatedAttachment.original_filename}`
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+      const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg);
+      if (generatedAttachment) {
+        await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
+      }
+    } else {
+      const history = await messageModel.getBySessionId(parsedSessionId);
+      const sources = deepSearch ? await deepSearchWeb(content) : [];
+      let aiReply = await getAIReply(history, sessionAttachments, sources);
+      if (sources.length > 0) {
+        const links = sources
+          .map((s) => `- [${s.title}](${s.url})`)
+          .join("\n");
+        aiReply += `\n\nSources:\n${links}`;
+      }
+      await messageModel.create(parsedSessionId, "assistant", aiReply);
+    }
+    
+    const messages = await messageModel.getBySessionId(parsedSessionId);
+    res.json({ messages });
+  } catch (err) {
+    console.error("POST /api/messages error:", err);
+    res.status(500).json({
+      error: "Failed to send message",
+      detail: process.env.NODE_ENV === "production" ? undefined : err.message,
+    });
+  }
+});
+
+app.put("/api/messages/:id", authMiddleware, async (req, res) => {
+  try {
+    const messageId = Number.parseInt(req.params.id, 10);
+    const { content, deepSearch, rewriteThread } = req.body || {};
+    if (!Number.isInteger(messageId) || !content || !String(content).trim()) {
+      return res.status(400).json({ error: "Valid message id and content are required" });
+    }
+
+    const targetMessage = await messageModel.getById(messageId);
+    if (!targetMessage) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+    if (targetMessage.role !== "user") {
+      return res.status(400).json({ error: "Only user messages can be edited" });
+    }
+
+    const session = await chatSessionModel.getById(targetMessage.session_id, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to edit this message" });
+    }
+
+    const normalizedContent = String(content).trim();
+    await messageModel.updateContent(messageId, normalizedContent);
+    if (rewriteThread === true) {
+      await messageModel.deleteAfterMessageInSession(targetMessage.session_id, messageId);
+    }
+
+    const sessionAttachments = await attachmentModel.getBySessionId(targetMessage.session_id);
+    const generationType = detectGenerationRequest(normalizedContent);
+    if (generationType) {
+      let generatedAttachment = null;
+      let generationError = null;
+      try {
+        if (generationType === "image") {
+          generatedAttachment = await generateImageFile(targetMessage.session_id, normalizedContent);
+        } else if (generationType === "ppt") {
+          generatedAttachment = await generatePptFile(targetMessage.session_id, normalizedContent);
+        } else if (generationType === "pdf") {
+          generatedAttachment = await generatePdfFile(targetMessage.session_id, normalizedContent);
+        } else if (generationType === "document") {
+          generatedAttachment = await generateDocumentFile(targetMessage.session_id, normalizedContent);
+        }
+      } catch (err) {
+        generationError = err;
+        console.error(`Generation failed after edit for type ${generationType}:`, err.message);
+      }
+
+      const assistantMsg = generatedAttachment
+        ? `Edited request processed. Generated ${generationType.toUpperCase()}: ${generatedAttachment.original_filename}`
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+      const assistantId = await messageModel.create(targetMessage.session_id, "assistant", assistantMsg);
+      if (generatedAttachment) {
+        await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
+      }
+    } else {
+      const history = await messageModel.getBySessionId(targetMessage.session_id);
+      const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
+      let aiReply = await getAIReply(history, sessionAttachments, sources);
+      if (sources.length > 0) {
+        const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
+        aiReply += `\n\nSources:\n${links}`;
+      }
+      await messageModel.create(targetMessage.session_id, "assistant", aiReply);
+    }
+
+    const messages = await messageModel.getBySessionId(targetMessage.session_id);
+    res.json({ messages });
+  } catch (err) {
+    console.error("PUT /api/messages/:id error:", err);
+    res.status(500).json({
+      error: "Failed to edit message",
+      detail: process.env.NODE_ENV === "production" ? undefined : err.message,
+    });
+  }
+});
+
+app.post("/api/deep-search", authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, query } = req.body;
+    const parsedSessionId = Number.parseInt(sessionId, 10);
+    if (!Number.isInteger(parsedSessionId) || !query || !query.trim()) {
+      return res.status(400).json({ error: "Valid sessionId and query required" });
+    }
+
+    const session = await chatSessionModel.getById(parsedSessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+
+    const sources = await deepSearchWeb(query.trim());
+    res.json({ sources });
+  } catch (err) {
+    console.error("POST /api/deep-search error:", err);
+    res.status(500).json({ error: "Failed to run deep search" });
+  }
+});
+
+app.post("/api/generate", authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, type, prompt } = req.body;
+    const parsedSessionId = Number.parseInt(sessionId, 10);
+    if (!Number.isInteger(parsedSessionId) || !type || !prompt) {
+      return res.status(400).json({ error: "sessionId, type and prompt are required" });
+    }
+
+    const session = await chatSessionModel.getById(parsedSessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+
+    let generatedAttachment = null;
+    const normalized = String(type).toLowerCase();
+    if (normalized === "image") {
+      generatedAttachment = await generateImageFile(parsedSessionId, prompt);
+    } else if (normalized === "ppt") {
+      generatedAttachment = await generatePptFile(parsedSessionId, prompt);
+    } else if (normalized === "pdf") {
+      generatedAttachment = await generatePdfFile(parsedSessionId, prompt);
+    } else if (normalized === "document") {
+      generatedAttachment = await generateDocumentFile(parsedSessionId, prompt);
+    } else {
+      return res.status(400).json({ error: "Unsupported type. Use image|ppt|pdf|document" });
+    }
+
+    const assistantMessage = await messageModel.create(
+      parsedSessionId,
+      "assistant",
+      `Generated ${normalized.toUpperCase()}: ${generatedAttachment.original_filename}`
+    );
+    await attachmentModel.linkToMessage(assistantMessage.id, generatedAttachment.id);
+    const messages = await messageModel.getBySessionId(parsedSessionId);
+    res.json({ attachment: generatedAttachment, messages });
+  } catch (err) {
+    console.error("POST /api/generate error:", err);
+    res.status(500).json({ error: err.message || "Failed to generate file" });
+  }
+});
+
+// Attachments routes
 app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
     if (!req.files || req.files.length === 0) return res.status(400).json({ error: "No files uploaded" });
 
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(parseInt(sessionId), req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+
     const attachmentIds = [];
     
     for (const file of req.files) {
       const analysisResult = await analyzeFile(file.path, file.mimetype, file.originalname);
-      const attachmentId = await insertAttachment(
+      const attachment = await attachmentModel.create(
         sessionId,
         file.filename,
         file.originalname,
@@ -520,7 +1220,7 @@ app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), asyn
         file.size,
         analysisResult
       );
-      attachmentIds.push(attachmentId);
+      attachmentIds.push(attachment.id);
     }
 
     res.json({ 
@@ -537,7 +1237,14 @@ app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), asyn
 app.get("/api/attachments", authMiddleware, async (req, res) => {
   try {
     const sessionId = parseInt(req.query.sessionId, 10);
-    const attachments = await getAttachmentsBySession(sessionId);
+    
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(sessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
+    
+    const attachments = await attachmentModel.getBySessionId(sessionId);
     res.json({ attachments });
   } catch (err) {
     console.error("GET /api/attachments error:", err);
@@ -545,77 +1252,19 @@ app.get("/api/attachments", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/api/messages", authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, content, attachmentIds } = req.body;
-    
-    const sessionAttachments = await getAttachmentsBySession(sessionId);
-    
-    const messageId = await insertMessage(sessionId, "user", content);
-    
-    if (attachmentIds && Array.isArray(attachmentIds)) {
-      for (const attId of attachmentIds) {
-        await linkMessageAttachment(messageId, attId);
-      }
-    }
-    
-    const history = await getMessagesBySession(sessionId);
-    const aiReply = await getAIReply(history, sessionAttachments);
-    await insertMessage(sessionId, "assistant", aiReply);
-    
-    res.json({ messages: await getMessagesBySession(sessionId) });
-  } catch (err) {
-    console.error("POST /api/messages error:", err);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
-app.post("/api/signup", async (req, res) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || !password) return res.status(400).json({ error: "username and password required" });
-
-    const existing = await findUserByUsername(username);
-    if (existing) return res.status(409).json({ error: "username taken" });
-
-    const user = await createUser(username, password);
-    const token = signToken(user);
-    res.status(201).json({ user: { id: user.id, username: user.username }, token });
-  } catch (err) {
-    console.error("POST /api/signup error:", err);
-    res.status(500).json({ error: "Failed to create user" });
-  }
-});
-
-app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || !password) return res.status(400).json({ error: "username and password required" });
-
-    const user = await findUserByUsername(username);
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
-
-    const ok = bcrypt.compareSync(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-    const token = signToken(user);
-    res.json({ user: { id: user.id, username: user.username }, token });
-  } catch (err) {
-    console.error("POST /api/login error:", err);
-    res.status(500).json({ error: "Failed to login" });
-  }
-});
-
-app.get("/api/me", authMiddleware, (req, res) => {
-  res.json({ user: req.user });
-});
-
+// Data upload and analytics
 app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(parseInt(sessionId), req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this session" });
+    }
 
     const filePath = req.file.path;
     const data = [];
@@ -650,7 +1299,7 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
           fs.writeFileSync(reportPath, JSON.stringify(reportContent, null, 2));
 
           // Save generated files as attachments linked to this session
-          const cleanedAttachmentId = await insertAttachment(
+          const cleanedAttachment = await attachmentModel.create(
             sessionId,
             cleanedFile,
             `Cleaned_${req.file.originalname}`,
@@ -661,7 +1310,7 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
             true // is_generated
           );
 
-          const reportAttachmentId = await insertAttachment(
+          const reportAttachment = await attachmentModel.create(
             sessionId,
             reportFile,
             `Report_${req.file.originalname.replace('.csv', '.json')}`,
@@ -678,8 +1327,8 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
             message: "Data processed successfully",
             cleanedFile,
             reportFile,
-            cleanedAttachmentId,
-            reportAttachmentId,
+            cleanedAttachmentId: cleanedAttachment.id,
+            reportAttachmentId: reportAttachment.id,
             structure: { columns: colArray, rowCount: cleanedData.length }
           });
         } catch (err) {
@@ -697,6 +1346,7 @@ app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, 
   }
 });
 
+// Download routes
 app.get("/api/download/:filename", authMiddleware, (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(generatedDir, filename);
@@ -713,20 +1363,20 @@ app.get("/api/download/:filename", authMiddleware, (req, res) => {
   });
 });
 
-// Download attachment by ID
 app.get("/api/download-attachment/:id", authMiddleware, async (req, res) => {
   try {
     const attachmentId = parseInt(req.params.id, 10);
     
-    const attachment = await new Promise((resolve, reject) => {
-      db.get("SELECT * FROM attachments WHERE id = ?", [attachmentId], (err, row) => {
-        if (err) return reject(err);
-        resolve(row);
-      });
-    });
+    const attachment = await attachmentModel.getById(attachmentId);
 
     if (!attachment) {
       return res.status(404).json({ error: "Attachment not found" });
+    }
+
+    // Verify session belongs to user
+    const session = await chatSessionModel.getById(attachment.session_id, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to download this attachment" });
     }
 
     if (!fs.existsSync(attachment.file_path)) {
@@ -745,6 +1395,7 @@ app.get("/api/download-attachment/:id", authMiddleware, async (req, res) => {
   }
 });
 
+// Helper functions
 function cleanData(data, columns) {
   const seen = new Set();
   const cleaned = data.filter(row => {
@@ -791,7 +1442,13 @@ function computeStats(data, columns) {
   return stats;
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 Backend running at http://localhost:${PORT}`);
-  console.log("Allowed origins:", ALLOWED_ORIGINS);
+// Start server
+initializeApp().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Backend running at http://localhost:${PORT}`);
+    console.log("Allowed origins:", ALLOWED_ORIGINS);
+  });
+}).catch(err => {
+  console.error("❌ Failed to start server:", err);
+  process.exit(1);
 });

@@ -562,12 +562,50 @@ body {
   font-weight: 600;
   margin-bottom: 0.5rem;
   opacity: 0.9;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.message-edit-btn {
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  padding: 0.12rem 0.5rem;
+  cursor: pointer;
+}
+
+.ai-row .message-edit-btn {
+  border-color: rgba(44, 62, 80, 0.25);
 }
 
 .content {
   font-size: 0.95rem;
   line-height: 1.6;
   word-wrap: break-word;
+}
+
+.edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #e8f1ff;
+  border: 1px solid #b8d0ff;
+  color: #27457a;
+  border-radius: 10px;
+  padding: 0.45rem 0.65rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.edit-banner button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* Code blocks */
@@ -2176,4 +2214,33 @@ body {
   .files-toggle-btn::after {
     content: '📁';
   }
+}
+.deep-search-btn {
+  background: #0f766e;
+  color: #fff;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.deep-search-btn:hover {
+  background: #0b5f58;
+}
+
+.deep-search-btn.active {
+  background: #f59e0b;
+  color: #1f2937;
+}
+
+.content a {
+  color: #0b6ef3;
+  text-decoration: underline;
+}
+
+.user-row .content a {
+  color: #e5f0ff;
 }

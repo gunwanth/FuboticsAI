@@ -3,10 +3,84 @@ import axios from "axios";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+axios.defaults.withCredentials = true;
+
+// Axios interceptor setup for token refresh
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach(prom => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
+// Setup axios interceptors
+axios.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem("accessToken");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+axios.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    
+    if (error.response?.status === 401 && error.response?.data?.code === "TOKEN_EXPIRED" && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then(token => {
+            originalRequest.headers.Authorization = `Bearer ${token}`;
+            return axios(originalRequest);
+          })
+          .catch(err => Promise.reject(err));
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true });
+        const { accessToken } = response.data;
+        
+        localStorage.setItem("accessToken", accessToken);
+        axios.defaults.headers.common["Authorization"] = `Bearer ${accessToken}`;
+        
+        processQueue(null, accessToken);
+        originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+        
+        return axios(originalRequest);
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        // If refresh fails, logout user
+        localStorage.removeItem("accessToken");
+        window.location.reload();
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
+    }
+    
+    return Promise.reject(error);
+  }
+);
 
 export default function App() {
   const [sessions, setSessions] = useState([]);
-  const [token, setToken] = useState(localStorage.getItem("token") || null);
+  const [token, setToken] = useState(localStorage.getItem("accessToken") || null);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -17,16 +91,36 @@ export default function App() {
   const chatWindowRef = useRef(null);
   const [dataAnalytics, setDataAnalytics] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
+  const [editingMessageId, setEditingMessageId] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    if (token) {
-      axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-    }
-    fetchSessions();
+    const bootstrapAuth = async () => {
+      const savedToken = localStorage.getItem("accessToken");
+      if (savedToken) {
+        setToken(savedToken);
+        axios.defaults.headers.common["Authorization"] = `Bearer ${savedToken}`;
+        return;
+      }
+
+      try {
+        const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true });
+        const refreshedToken = response.data?.accessToken;
+        if (refreshedToken) {
+          localStorage.setItem("accessToken", refreshedToken);
+          setToken(refreshedToken);
+          axios.defaults.headers.common["Authorization"] = `Bearer ${refreshedToken}`;
+        }
+      } catch (_) {
+        localStorage.removeItem("accessToken");
+      }
+    };
+
+    bootstrapAuth();
   }, []);
 
   useEffect(() => {
@@ -46,13 +140,18 @@ export default function App() {
   }, [sidebarVisible]);
 
   useEffect(() => {
-    const t = localStorage.getItem("token");
-    if (t && !token) setToken(t);
-  }, []);
-
-  useEffect(() => {
-    if (token) axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-    else delete axios.defaults.headers.common["Authorization"];
+    if (token) {
+      localStorage.setItem("accessToken", token);
+      axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+      fetchSessions();
+    } else {
+      localStorage.removeItem("accessToken");
+      delete axios.defaults.headers.common["Authorization"];
+      setSessions([]);
+      setSelectedSessionId(null);
+      setMessages([]);
+      setSessionAttachments([]);
+    }
   }, [token]);
 
   function AuthScreen() {
@@ -64,15 +163,16 @@ export default function App() {
       e.preventDefault();
       try {
         const path = localMode === "signup" ? "/api/signup" : "/api/login";
-        const res = await axios.post(`${API_BASE}${path}`, { username: localUser, password: localPass });
-        const t = res.data.token;
+        const res = await axios.post(
+          `${API_BASE}${path}`,
+          { username: localUser, password: localPass },
+          { withCredentials: true }
+        );
+        const t = res.data.accessToken;
         if (t) {
           setToken(t);
-          localStorage.setItem("token", t);
-          axios.defaults.headers.common["Authorization"] = `Bearer ${t}`;
           setLocalUser("");
           setLocalPass("");
-          fetchSessions();
         }
       } catch (err) {
         console.error("Auth error", err.response?.data || err.message || err);
@@ -123,6 +223,7 @@ export default function App() {
   }
 
   async function fetchSessions() {
+    if (!token) return;
     try {
       const res = await axios.get(`${API_BASE}/api/sessions`);
       const list = res.data.sessions || [];
@@ -138,10 +239,13 @@ export default function App() {
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await axios.post(`${API_BASE}/api/logout`, {}, { withCredentials: true });
+    } catch (err) {
+      console.error("Logout request failed", err);
+    }
     setToken(null);
-    localStorage.removeItem("token");
-    delete axios.defaults.headers.common["Authorization"];
   }
 
   async function fetchMessages(sessionId) {
@@ -265,8 +369,29 @@ export default function App() {
     }
 
     const text = input.trim() || "(Sent files)";
-    setInput("");
     setLoading(true);
+
+    if (editingMessageId) {
+      try {
+        const res = await axios.put(`${API_BASE}/api/messages/${editingMessageId}`, {
+          content: text,
+          deepSearch: deepSearchEnabled,
+        });
+        setMessages(res.data.messages || []);
+        setInput("");
+        setEditingMessageId(null);
+      } catch (err) {
+        console.error("Edit resend error", err);
+        alert(err.response?.data?.error || "Failed to edit message");
+      } finally {
+        setLoading(false);
+        setIsTyping(false);
+        setDeepSearchEnabled(false);
+      }
+      return;
+    }
+
+    setInput("");
 
     // Optimistic UI
     const tempMsg = { 
@@ -287,6 +412,7 @@ export default function App() {
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: selectedSessionId,
         content: text,
+        deepSearch: deepSearchEnabled,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
       });
       setMessages(res.data.messages || []);
@@ -303,7 +429,21 @@ export default function App() {
     } finally {
       setLoading(false);
       setIsTyping(false);
+      setDeepSearchEnabled(false);
     }
+  }
+
+  function startEditingMessage(msg) {
+    if (!msg || msg.role !== "user") return;
+    setEditingMessageId(msg.id);
+    setInput(msg.content || "");
+    setAttachedFiles([]);
+    setPendingAttachmentIds([]);
+  }
+
+  function cancelEditingMessage() {
+    setEditingMessageId(null);
+    setInput("");
   }
 
   function handleKeyDown(e) {
@@ -611,14 +751,50 @@ export default function App() {
   }
 
   function renderBoldText(text) {
-    const parts = text.split(/(\*\*.*?\*\*)/g);
-    
-    return parts.map((part, index) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={index}>{part.slice(2, -2)}</strong>;
+    const elements = [];
+    const regex = /(\*\*.*?\*\*|\[[^\]]+\]\(([^)\s]+)\)|((?:https?:\/\/|www\.)[^\s]+))/g;
+    let lastIndex = 0;
+    let match;
+    let key = 0;
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        elements.push(<span key={key++}>{text.substring(lastIndex, match.index)}</span>);
       }
-      return <span key={index}>{part}</span>;
-    });
+
+      const token = match[0];
+      if (token.startsWith("**") && token.endsWith("**")) {
+        elements.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
+      } else if (token.startsWith("[") && token.includes("](")) {
+        const parts = token.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+        if (parts) {
+          const href = parts[2].startsWith("www.") ? `https://${parts[2]}` : parts[2];
+          elements.push(
+            <a key={key++} href={href} target="_blank" rel="noreferrer">
+              {parts[1]}
+            </a>
+          );
+        } else {
+          elements.push(<span key={key++}>{token}</span>);
+        }
+      } else {
+        const cleanToken = token.replace(/[),.;]+$/, "");
+        const href = cleanToken.startsWith("www.") ? `https://${cleanToken}` : cleanToken;
+        elements.push(
+          <a key={key++} href={href} target="_blank" rel="noreferrer">
+            {cleanToken}
+          </a>
+        );
+      }
+
+      lastIndex = regex.lastIndex;
+    }
+
+    if (lastIndex < text.length) {
+      elements.push(<span key={key++}>{text.substring(lastIndex)}</span>);
+    }
+
+    return elements.length > 0 ? elements : <span>{text}</span>;
   }
 
   return (
@@ -704,6 +880,13 @@ export default function App() {
                 <h1>Fubotics AI</h1>
               </div>
               <div className="header-actions">
+                <button
+                  className={`deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
+                  onClick={() => setDeepSearchEnabled((prev) => !prev)}
+                  title="Use deep web research for next message"
+                >
+                  {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
+                </button>
                 <button 
                   className="files-toggle-btn"
                   onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
@@ -751,6 +934,16 @@ export default function App() {
                     <div className="bubble">
                       <div className="sender">
                         {msg.role === "user" ? "You" : "Fubotics AI"}
+                        {msg.role === "user" && (
+                          <button
+                            className="message-edit-btn"
+                            onClick={() => startEditingMessage(msg)}
+                            type="button"
+                            title="Edit and resend this message"
+                          >
+                            Edit
+                          </button>
+                        )}
                       </div>
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="message-attachments">
@@ -783,6 +976,12 @@ export default function App() {
             </div>
 
             <div className="input-area" onClick={(e) => e.stopPropagation()}>
+              {editingMessageId && (
+                <div className="edit-banner">
+                  Editing previous message
+                  <button type="button" onClick={cancelEditingMessage}>Cancel</button>
+                </div>
+              )}
               {attachedFiles.length > 0 && (
                 <div className="attached-files-preview">
                   {attachedFiles.map((file, idx) => (
@@ -800,13 +999,13 @@ export default function App() {
                   onChange={handleFileAttachment}
                   style={{ display: 'none' }}
                   multiple
-                  accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx"
+                  accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx,.docx,.pptx"
                   disabled={uploading}
                 />
                 <button
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !selectedSessionId}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId}
                   title="Attach files"
                 >
                   📎
@@ -829,7 +1028,7 @@ export default function App() {
                 <button
                   className="csv-upload-btn"
                   onClick={() => document.getElementById('csv-upload-input').click()}
-                  disabled={uploading || !selectedSessionId}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId}
                   title="Upload CSV for Analytics"
                 >
                   📊
@@ -839,7 +1038,7 @@ export default function App() {
                   onClick={handleSend}
                   disabled={loading || (!input.trim() && attachedFiles.length === 0)}
                 >
-                  {loading ? "..." : "Send"}
+                  {loading ? "..." : editingMessageId ? "Resend" : "Send"}
                 </button>
               </div>
             </div>
