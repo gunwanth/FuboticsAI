@@ -339,8 +339,60 @@ const aiDeepSearchMaxTokens = Math.min(
   Math.max(aiDefaultMaxTokens, Number.parseInt(process.env.AI_DEEP_SEARCH_MAX_TOKENS || "3072", 10))
 );
 
-async function generateNarrative(prompt, style = "document") {
-  const contentPrompt = `Create a high quality ${style} based on this request:\n${prompt}\n\nReturn only final content (no meta commentary).`;
+function buildHistoryContext(history = [], maxMessages = 24) {
+  const recent = Array.isArray(history) ? history.slice(-maxMessages) : [];
+  return recent
+    .map((m) => {
+      const role = m.role === "assistant" ? "Assistant" : m.role === "system" ? "System" : "User";
+      return `[${role}] ${String(m.content || "").trim()}`;
+    })
+    .join("\n")
+    .slice(0, 14000);
+}
+
+function shouldReviewAcrossChats(content = "") {
+  const text = String(content || "").toLowerCase();
+  const patterns = [
+    "existing chats",
+    "previous chats",
+    "review chats",
+    "past chats",
+    "across chats",
+    "all chats",
+    "older chats",
+  ];
+  return patterns.some((p) => text.includes(p));
+}
+
+async function getCrossChatContext(userId, currentSessionId) {
+  try {
+    const sessions = await chatSessionModel.getByUserId(userId);
+    const others = sessions.filter((s) => s.id !== currentSessionId).slice(0, 5);
+    const chunks = [];
+    for (const s of others) {
+      const recent = await messageModel.getRecentBySessionId(s.id, 6);
+      if (!recent.length) continue;
+      const title = s.name || `Chat ${s.id}`;
+      const block = recent
+        .map((m) => `[${m.role}] ${String(m.content || "").trim()}`)
+        .join("\n")
+        .slice(0, 3000);
+      chunks.push(`Session: ${title}\n${block}`);
+    }
+    return chunks.join("\n\n").slice(0, 10000);
+  } catch (err) {
+    console.error("Cross-chat context fetch failed:", err.message);
+    return "";
+  }
+}
+
+async function generateNarrative(prompt, style = "document", contextText = "") {
+  const contentPrompt = `Create a high quality ${style} based on this request:\n${prompt}
+
+Conversation context (use this as source material when relevant):
+${contextText || "No additional context provided."}
+
+Return only final content (no meta commentary).`;
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
@@ -495,8 +547,8 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
   }
 }
 
-async function generateDocumentFile(sessionId, prompt) {
-  const content = await generateNarrative(prompt, "word document");
+async function generateDocumentFile(sessionId, prompt, contextText = "") {
+  const content = await generateNarrative(prompt, "word document", contextText);
   const filename = `document_${Date.now()}.docx`;
   const filePath = path.join(generatedDir, filename);
   const doc = new Document({
@@ -523,8 +575,8 @@ async function generateDocumentFile(sessionId, prompt) {
   );
 }
 
-async function generatePdfFile(sessionId, prompt) {
-  const content = await generateNarrative(prompt, "pdf report");
+async function generatePdfFile(sessionId, prompt, contextText = "") {
+  const content = await generateNarrative(prompt, "pdf report", contextText);
   const filename = `document_${Date.now()}.pdf`;
   const filePath = path.join(generatedDir, filename);
   await new Promise((resolve, reject) => {
@@ -552,8 +604,8 @@ async function generatePdfFile(sessionId, prompt) {
   );
 }
 
-async function generatePptFile(sessionId, prompt) {
-  const content = await generateNarrative(prompt, "presentation with key points");
+async function generatePptFile(sessionId, prompt, contextText = "") {
+  const content = await generateNarrative(prompt, "presentation with key points", contextText);
   const bullets = content
     .split("\n")
     .map((line) => line.replace(/^[-*\d.\s]+/, "").trim())
@@ -581,6 +633,23 @@ async function generatePptFile(sessionId, prompt) {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     fs.statSync(filePath).size,
     JSON.stringify({ type: "generated_ppt", prompt }),
+    true
+  );
+}
+
+async function generateNotesFile(sessionId, prompt, contextText = "") {
+  const content = await generateNarrative(prompt, "structured study notes in markdown", contextText);
+  const filename = `notes_${Date.now()}.md`;
+  const filePath = path.join(generatedDir, filename);
+  fs.writeFileSync(filePath, content, "utf8");
+  return attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    "text/markdown",
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_notes", prompt }),
     true
   );
 }
@@ -835,15 +904,23 @@ async function generateImageFile(sessionId, prompt) {
 
 function detectGenerationRequest(content) {
   const text = (content || "").toLowerCase();
-  if (!text.includes("generate") && !text.includes("create")) return null;
+  const asksForCreation =
+    text.includes("generate") ||
+    text.includes("create") ||
+    text.includes("make") ||
+    text.includes("export") ||
+    text.includes("convert") ||
+    text.includes("prepare");
+  if (!asksForCreation) return null;
   if (text.includes("image")) return "image";
   if (text.includes("ppt") || text.includes("powerpoint") || text.includes("presentation")) return "ppt";
   if (text.includes("pdf")) return "pdf";
+  if (text.includes("notes") || text.includes("note")) return "notes";
   if (text.includes("docx") || text.includes("word") || text.includes("doc") || text.includes("document")) return "document";
   return null;
 }
 
-async function getAIReply(history, sessionAttachments = [], webSources = []) {
+async function getAIReply(history, sessionAttachments = [], webSources = [], extraContext = "") {
   try {
     let systemContent = "You are a helpful assistant.";
     
@@ -871,6 +948,10 @@ async function getAIReply(history, sessionAttachments = [], webSources = []) {
         systemContent += `\n- ${source.title} (${source.url})\n  Snippet: ${safeSnippet}`;
       }
       systemContent += "\n\nUse these sources to provide a research-focused response with factual caution.";
+    }
+    if (extraContext && extraContext.trim()) {
+      systemContent += `\n\nAdditional context from other chats:\n${extraContext.trim()}`;
+      systemContent += "\n\nUse it only if relevant to the current user request.";
     }
 
     const messages = [
@@ -1016,14 +1097,18 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       let generatedAttachment = null;
       let generationError = null;
       try {
+        const historyForGeneration = await messageModel.getBySessionId(parsedSessionId);
+        const conversationContext = buildHistoryContext(historyForGeneration);
         if (generationType === "image") {
           generatedAttachment = await generateImageFile(parsedSessionId, content);
         } else if (generationType === "ppt") {
-          generatedAttachment = await generatePptFile(parsedSessionId, content);
+          generatedAttachment = await generatePptFile(parsedSessionId, content, conversationContext);
         } else if (generationType === "pdf") {
-          generatedAttachment = await generatePdfFile(parsedSessionId, content);
+          generatedAttachment = await generatePdfFile(parsedSessionId, content, conversationContext);
+        } else if (generationType === "notes") {
+          generatedAttachment = await generateNotesFile(parsedSessionId, content, conversationContext);
         } else if (generationType === "document") {
-          generatedAttachment = await generateDocumentFile(parsedSessionId, content);
+          generatedAttachment = await generateDocumentFile(parsedSessionId, content, conversationContext);
         }
       } catch (err) {
         generationError = err;
@@ -1040,7 +1125,10 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
     } else {
       const history = await messageModel.getBySessionId(parsedSessionId);
       const sources = deepSearch ? await deepSearchWeb(content) : [];
-      let aiReply = await getAIReply(history, sessionAttachments, sources);
+      const crossChatContext = shouldReviewAcrossChats(content)
+        ? await getCrossChatContext(req.user.id, parsedSessionId)
+        : "";
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext);
       if (sources.length > 0) {
         const links = sources
           .map((s) => `- [${s.title}](${s.url})`)
@@ -1094,14 +1182,18 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       let generatedAttachment = null;
       let generationError = null;
       try {
+        const historyForGeneration = await messageModel.getBySessionId(targetMessage.session_id);
+        const conversationContext = buildHistoryContext(historyForGeneration);
         if (generationType === "image") {
           generatedAttachment = await generateImageFile(targetMessage.session_id, normalizedContent);
         } else if (generationType === "ppt") {
-          generatedAttachment = await generatePptFile(targetMessage.session_id, normalizedContent);
+          generatedAttachment = await generatePptFile(targetMessage.session_id, normalizedContent, conversationContext);
         } else if (generationType === "pdf") {
-          generatedAttachment = await generatePdfFile(targetMessage.session_id, normalizedContent);
+          generatedAttachment = await generatePdfFile(targetMessage.session_id, normalizedContent, conversationContext);
+        } else if (generationType === "notes") {
+          generatedAttachment = await generateNotesFile(targetMessage.session_id, normalizedContent, conversationContext);
         } else if (generationType === "document") {
-          generatedAttachment = await generateDocumentFile(targetMessage.session_id, normalizedContent);
+          generatedAttachment = await generateDocumentFile(targetMessage.session_id, normalizedContent, conversationContext);
         }
       } catch (err) {
         generationError = err;
@@ -1118,7 +1210,10 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
     } else {
       const history = await messageModel.getBySessionId(targetMessage.session_id);
       const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
-      let aiReply = await getAIReply(history, sessionAttachments, sources);
+      const crossChatContext = shouldReviewAcrossChats(normalizedContent)
+        ? await getCrossChatContext(req.user.id, targetMessage.session_id)
+        : "";
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext);
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;
@@ -1173,16 +1268,20 @@ app.post("/api/generate", authMiddleware, async (req, res) => {
 
     let generatedAttachment = null;
     const normalized = String(type).toLowerCase();
+    const historyForGeneration = await messageModel.getBySessionId(parsedSessionId);
+    const conversationContext = buildHistoryContext(historyForGeneration);
     if (normalized === "image") {
       generatedAttachment = await generateImageFile(parsedSessionId, prompt);
     } else if (normalized === "ppt") {
-      generatedAttachment = await generatePptFile(parsedSessionId, prompt);
+      generatedAttachment = await generatePptFile(parsedSessionId, prompt, conversationContext);
     } else if (normalized === "pdf") {
-      generatedAttachment = await generatePdfFile(parsedSessionId, prompt);
+      generatedAttachment = await generatePdfFile(parsedSessionId, prompt, conversationContext);
+    } else if (normalized === "notes") {
+      generatedAttachment = await generateNotesFile(parsedSessionId, prompt, conversationContext);
     } else if (normalized === "document") {
-      generatedAttachment = await generateDocumentFile(parsedSessionId, prompt);
+      generatedAttachment = await generateDocumentFile(parsedSessionId, prompt, conversationContext);
     } else {
-      return res.status(400).json({ error: "Unsupported type. Use image|ppt|pdf|document" });
+      return res.status(400).json({ error: "Unsupported type. Use image|ppt|pdf|notes|document" });
     }
 
     const assistantMessage = await messageModel.create(
