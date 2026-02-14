@@ -148,11 +148,17 @@ async function analyzeFile(filePath, fileType, originalFilename) {
           .on('data', (row) => rows.push(row))
           .on('end', () => {
             const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+            const csvText = rows
+              .slice(0, 120)
+              .map((r) => columns.map((c) => `${c}: ${String(r[c] ?? "")}`).join(" | "))
+              .join("\n")
+              .slice(0, extractionMaxChars);
             const summary = {
               type: 'csv',
               rows: rows.length,
               columns: columns,
-              sample: rows.slice(0, 3)
+              sample: rows.slice(0, 10),
+              extracted_text: csvText
             };
             resolve(JSON.stringify(summary));
           })
@@ -162,23 +168,27 @@ async function analyzeFile(filePath, fileType, originalFilename) {
       const content = fs.readFileSync(filePath, 'utf8');
       return JSON.stringify({
         type: fileType === 'application/json' ? 'json' : 'text',
-        preview: content.substring(0, 1000),
+        preview: content.substring(0, 2000),
+        extracted_text: content.substring(0, extractionMaxChars),
         size: content.length
       });
     } else if (fileType === "application/pdf" || lowerName.endsWith(".pdf")) {
       const buffer = fs.readFileSync(filePath);
       const parsed = await pdfParse(buffer);
+      const text = (parsed.text || "").replace(/\s+/g, " ").trim();
       return JSON.stringify({
         type: "pdf",
         pages: parsed.numpages,
-        preview: (parsed.text || "").replace(/\s+/g, " ").trim().substring(0, 1200)
+        preview: text.substring(0, 2000),
+        extracted_text: text.substring(0, extractionMaxChars)
       });
     } else if (fileType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || lowerName.endsWith(".docx")) {
       const extracted = await mammoth.extractRawText({ path: filePath });
       const text = (extracted.value || "").replace(/\s+/g, " ").trim();
       return JSON.stringify({
         type: "docx",
-        preview: text.substring(0, 1200),
+        preview: text.substring(0, 2000),
+        extracted_text: text.substring(0, extractionMaxChars),
         length: text.length
       });
     } else if (
@@ -191,12 +201,18 @@ async function analyzeFile(filePath, fileType, originalFilename) {
       const firstSheet = workbook.SheetNames[0];
       const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { defval: "" });
       const columns = rows.length ? Object.keys(rows[0]) : [];
+      const sheetText = rows
+        .slice(0, 150)
+        .map((r) => columns.map((c) => `${c}: ${String(r[c] ?? "")}`).join(" | "))
+        .join("\n")
+        .slice(0, extractionMaxChars);
       return JSON.stringify({
         type: "spreadsheet",
         sheet: firstSheet,
         rows: rows.length,
         columns,
-        sample: rows.slice(0, 3)
+        sample: rows.slice(0, 10),
+        extracted_text: sheetText
       });
     }
     
@@ -233,6 +249,10 @@ const huggingFaceApiKey = process.env.HUGGINGFACE_API_KEY || process.env.HF_API_
 const huggingFaceImageModel = process.env.HF_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
 const pollinationsBaseUrl = (process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai").replace(/\/$/, "");
 const pollinationsImageModel = process.env.POLLINATIONS_IMAGE_MODEL || "flux";
+const extractionMaxChars = Math.min(
+  120000,
+  Math.max(4000, Number.parseInt(process.env.EXTRACTION_MAX_CHARS || "30000", 10))
+);
 
 function createFallbackPng(prompt = "") {
   const width = 768;
@@ -407,22 +427,24 @@ Return only final content (no meta commentary).`;
 
 function renderAttachmentInsight(analysis) {
   if (!analysis || typeof analysis !== "object") return "";
+  const richText = String(analysis.extracted_text || analysis.preview || "").substring(0, 6000);
   if (analysis.type === "csv") {
-    return `CSV with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}`;
+    return `CSV with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}. Extracted content: ${richText}`;
   }
   if (analysis.type === "spreadsheet") {
-    return `Spreadsheet (${analysis.sheet || "sheet"}) with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}. Sample: ${JSON.stringify(analysis.sample || []).substring(0, 600)}`;
+    return `Spreadsheet (${analysis.sheet || "sheet"}) with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}. Extracted content: ${richText}`;
   }
   if (analysis.type === "pdf") {
-    return `PDF with ${analysis.pages || "unknown"} pages. Extracted text: ${(analysis.preview || "").substring(0, 1200)}`;
+    return `PDF with ${analysis.pages || "unknown"} pages. Extracted text: ${richText}`;
   }
   if (analysis.type === "docx") {
-    return `DOCX extracted text: ${(analysis.preview || "").substring(0, 1200)}`;
+    return `DOCX extracted text: ${richText}`;
   }
   if (analysis.type === "json" || analysis.type === "text") {
-    return `${analysis.type.toUpperCase()} preview: ${(analysis.preview || "").substring(0, 1200)}`;
+    return `${analysis.type.toUpperCase()} extracted text: ${richText}`;
   }
-  if (analysis.preview) return String(analysis.preview).substring(0, 1200);
+  if (analysis.extracted_text) return String(analysis.extracted_text).substring(0, 6000);
+  if (analysis.preview) return String(analysis.preview).substring(0, 2000);
   if (analysis.sample) return `Sample data: ${JSON.stringify(analysis.sample).substring(0, 700)}`;
   return "";
 }
@@ -973,6 +995,33 @@ async function getAIReply(history, sessionAttachments = [], webSources = [], ext
   }
 }
 
+function resolveAttachmentDiskPath(attachment) {
+  if (!attachment) return null;
+  const candidates = [];
+  if (attachment.file_path) candidates.push(String(attachment.file_path));
+  if (attachment.filename) {
+    candidates.push(path.join(attachmentsDir, attachment.filename));
+    candidates.push(path.join(uploadDir, attachment.filename));
+    candidates.push(path.join(generatedDir, attachment.filename));
+  }
+  if (attachment.original_filename) {
+    candidates.push(path.join(attachmentsDir, attachment.original_filename));
+    candidates.push(path.join(uploadDir, attachment.original_filename));
+    candidates.push(path.join(generatedDir, attachment.original_filename));
+  }
+  if (attachment.file_path) {
+    const base = path.basename(String(attachment.file_path).replace(/\\/g, "/"));
+    candidates.push(path.join(attachmentsDir, base));
+    candidates.push(path.join(uploadDir, base));
+    candidates.push(path.join(generatedDir, base));
+  }
+
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 // ---------- ROUTES ----------
 
 // Health check
@@ -1483,11 +1532,18 @@ app.get("/api/download-attachment/:id", authMiddleware, async (req, res) => {
       return res.status(403).json({ error: "Unauthorized to download this attachment" });
     }
 
-    if (!fs.existsSync(attachment.file_path)) {
-      return res.status(404).json({ error: "File not found on disk" });
+    const resolvedPath = resolveAttachmentDiskPath(attachment);
+    if (!resolvedPath) {
+      return res.status(404).json({
+        error: "File not found on disk",
+        detail:
+          process.env.NODE_ENV === "production"
+            ? undefined
+            : "Stored attachment path is missing in this runtime. Re-upload file or move it to uploads/attachments/generated.",
+      });
     }
 
-    res.download(attachment.file_path, attachment.original_filename, (err) => {
+    res.download(resolvedPath, attachment.original_filename, (err) => {
       if (err) {
         console.error("Download error:", err);
         res.status(500).json({ error: "Failed to download file" });
