@@ -1337,28 +1337,65 @@ app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) =
       return res.status(404).json({ error: "Shared chat not found" });
     }
 
-    const sourceSessionRes = await db.query(
-      "SELECT id, name FROM chat_sessions WHERE id = $1",
-      [share.session_id]
-    );
-    const sourceSession = sourceSessionRes.rows[0];
-    if (!sourceSession) {
-      return res.status(404).json({ error: "Source chat not found" });
+    const incomingHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const hasIncomingHistory = incomingHistory.length > 0;
+
+    if (hasIncomingHistory) {
+      const normalizedHistory = incomingHistory
+        .filter((m) => m && (m.role === "user" || m.role === "assistant" || m.role === "system"))
+        .map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 12000) }))
+        .slice(-120);
+
+      const firstUser = normalizedHistory.find((m) => m.role === "user");
+      const suggested = await suggestSessionNameFromPrompt(firstUser?.content || "Shared Chat");
+      const newSession = await chatSessionModel.create(req.user.id, suggested || "Shared Chat");
+      for (const m of normalizedHistory) {
+        await messageModel.create(newSession.id, m.role, m.content);
+      }
+      const messages = await messageModel.getBySessionId(newSession.id);
+      return res.json({ session: newSession, messages });
     }
+
+    const sourceSessionRes = await db.query("SELECT id, name FROM chat_sessions WHERE id = $1", [share.session_id]);
+    const sourceSession = sourceSessionRes.rows[0];
+    if (!sourceSession) return res.status(404).json({ error: "Source chat not found" });
 
     const newSession = await chatSessionModel.create(
       req.user.id,
       sourceSession.name ? `${sourceSession.name} (shared copy)` : "Shared Chat Copy"
     );
     const sourceMessages = await messageModel.getBySessionId(sourceSession.id);
-    for (const m of sourceMessages) {
-      await messageModel.create(newSession.id, m.role, m.content);
-    }
+    for (const m of sourceMessages) await messageModel.create(newSession.id, m.role, m.content);
     const messages = await messageModel.getBySessionId(newSession.id);
-    res.json({ session: newSession, messages });
+    return res.json({ session: newSession, messages });
   } catch (err) {
     console.error("POST /api/public/share/:token/continue error:", err);
     res.status(500).json({ error: "Failed to continue shared chat" });
+  }
+});
+
+app.post("/api/public/share/:token/chat", async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    const content = String(req.body?.content || "").trim();
+    const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    if (!token) return res.status(400).json({ error: "Share token required" });
+    if (!content) return res.status(400).json({ error: "Message content is required" });
+
+    const share = await shareChatModel.getByToken(token);
+    if (!share) return res.status(404).json({ error: "Shared chat not found" });
+
+    const sanitizedHistory = history
+      .filter((m) => m && (m.role === "user" || m.role === "assistant" || m.role === "system"))
+      .map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 12000) }))
+      .slice(-30);
+    sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
+
+    const assistant = await getAIReply(sanitizedHistory, [], [], "");
+    res.json({ assistant });
+  } catch (err) {
+    console.error("POST /api/public/share/:token/chat error:", err);
+    res.status(500).json({ error: "Failed to process shared chat message" });
   }
 });
 

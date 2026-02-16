@@ -103,6 +103,10 @@ export default function App() {
   const [sharedView, setSharedView] = useState({ loading: false, error: "", session: null, messages: [] });
   const [showAuthScreen, setShowAuthScreen] = useState(false);
   const [pendingContinueShared, setPendingContinueShared] = useState(false);
+  const [authIntentMode, setAuthIntentMode] = useState("login");
+  const [sharedMessages, setSharedMessages] = useState([]);
+  const [anonymousSharedQuestionCount, setAnonymousSharedQuestionCount] = useState(0);
+  const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -126,6 +130,7 @@ export default function App() {
           session: res.data?.session || null,
           messages: res.data?.messages || [],
         });
+        setSharedMessages(res.data?.messages || []);
       } catch (err) {
         setSharedView({
           loading: false,
@@ -133,9 +138,16 @@ export default function App() {
           session: null,
           messages: [],
         });
+        setSharedMessages([]);
       }
     };
     loadShared();
+    setShowAuthScreen(false);
+  }, [shareToken]);
+
+  useEffect(() => {
+    setAnonymousSharedQuestionCount(0);
+    setSharedLimitModal(null);
   }, [shareToken]);
 
   useEffect(() => {
@@ -207,7 +219,11 @@ export default function App() {
   function AuthScreen() {
     const [localUser, setLocalUser] = useState("");
     const [localPass, setLocalPass] = useState("");
-    const [localMode, setLocalMode] = useState("login");
+    const [localMode, setLocalMode] = useState(authIntentMode || "login");
+
+    useEffect(() => {
+      setLocalMode(authIntentMode || "login");
+    }, [authIntentMode]);
 
     async function handleLocalSubmit(e) {
       e.preventDefault();
@@ -221,6 +237,7 @@ export default function App() {
         const t = res.data.accessToken;
         if (t) {
           setToken(t);
+          setShowAuthScreen(false);
           setLocalUser("");
           setLocalPass("");
         }
@@ -473,6 +490,7 @@ export default function App() {
     if (!shareToken) return;
     if (!token) {
       setPendingContinueShared(true);
+      setAuthIntentMode("login");
       setShowAuthScreen(true);
       return;
     }
@@ -482,7 +500,13 @@ export default function App() {
   async function continueSharedChatWithCurrentAuth() {
     if (!shareToken) return;
     try {
-      const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/continue`);
+      const historyPayload = (sharedMessages || []).map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/continue`, {
+        history: historyPayload,
+      });
       const newSessionId = res.data?.session?.id;
       if (!newSessionId) return;
       const url = new URL(window.location.href);
@@ -496,6 +520,14 @@ export default function App() {
     } catch (err) {
       alert(err.response?.data?.error || "Failed to continue shared chat");
     }
+  }
+
+  function openAuthFor(mode) {
+    setAuthIntentMode(mode);
+    if (shareToken && !token) {
+      setPendingContinueShared(true);
+    }
+    setShowAuthScreen(true);
   }
 
   // Handle file attachment selection
@@ -543,6 +575,11 @@ export default function App() {
     if ((!input.trim() && attachedFiles.length === 0) || loading) return;
 
     const text = input.trim() || "(Sent files)";
+    const isAnonymousSharedMode = !!shareToken && !token;
+    if (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) {
+      setSharedLimitModal("hard");
+      return;
+    }
     setLoading(true);
 
     if (editingMessageId) {
@@ -583,6 +620,28 @@ export default function App() {
 
     setIsTyping(true);
     try {
+      if (isAnonymousSharedMode) {
+        const tempUser = { id: Date.now(), role: "user", content: text };
+        setSharedMessages((prev) => [...prev, tempUser]);
+        const historyForApi = [...sharedMessages, tempUser].map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/chat`, {
+          content: text,
+          history: historyForApi,
+        });
+        const assistant = String(res.data?.assistant || "").trim() || "No reply";
+        setSharedMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
+
+        const nextCount = anonymousSharedQuestionCount + 1;
+        setAnonymousSharedQuestionCount(nextCount);
+        if (nextCount === 10) setSharedLimitModal("soft");
+        if (nextCount >= 15) setSharedLimitModal("hard");
+        setInput("");
+        return;
+      }
+
       const targetSessionId = await ensureSessionForMessage(text);
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: targetSessionId,
@@ -980,7 +1039,7 @@ export default function App() {
 
   return (
     <div className="app">
-      {!token && (!shareToken || showAuthScreen) ? (
+      {!token && !shareToken ? (
         <div className="layout">
           <AuthScreen />
         </div>
@@ -1093,6 +1152,43 @@ export default function App() {
           </div>
         )}
 
+        {sharedLimitModal && (
+          <div
+            className="delete-chat-modal-overlay"
+            onClick={() => sharedLimitModal === "soft" && setSharedLimitModal(null)}
+          >
+            <div className="delete-chat-modal" onClick={(e) => e.stopPropagation()}>
+              {sharedLimitModal === "soft" ? (
+                <>
+                  <h3>Unlock Full Potential</h3>
+                  <p>To use the complete potential please login</p>
+                  <div className="delete-chat-modal-actions">
+                    <button className="confirm-btn" onClick={() => openAuthFor("login")}>Login</button>
+                    <button className="cancel-btn" onClick={() => setSharedLimitModal(null)}>Close</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h3>Please Login To Continue</h3>
+                  <p>You have reached the shared chat limit.</p>
+                  <div className="delete-chat-modal-actions">
+                    <button className="confirm-btn" onClick={() => openAuthFor("login")}>Login</button>
+                    <button className="cancel-btn" onClick={() => openAuthFor("signup")}>Signup</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!token && shareToken && showAuthScreen && (
+          <div className="auth-modal-overlay" onClick={() => { setShowAuthScreen(false); setPendingContinueShared(false); }}>
+            <div className="auth-modal-content" onClick={(e) => e.stopPropagation()}>
+              <AuthScreen />
+            </div>
+          </div>
+        )}
+
         <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''} ${filesSidebarVisible ? 'files-open' : ''}`} onClick={handleChatAreaClick}>
           <button 
             className="toggle-sidebar-btn" 
@@ -1117,6 +1213,7 @@ export default function App() {
                 <button
                   className={`deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
                   onClick={() => setDeepSearchEnabled((prev) => !prev)}
+                  disabled={!!shareToken && !token}
                   title="Use deep web research for next message"
                 >
                   {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
@@ -1124,6 +1221,7 @@ export default function App() {
                 <button 
                   className="files-toggle-btn"
                   onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
+                  disabled={!!shareToken && !token}
                   title="Toggle Files"
                 >
                   📁 Files
@@ -1143,7 +1241,7 @@ export default function App() {
                 <div className="empty-state"><div className="empty-state-content"><p>{sharedView.error}</p></div></div>
               )}
               {shareToken && !sharedView.loading && !sharedView.error &&
-                sharedView.messages.map((msg) => (
+                sharedMessages.map((msg) => (
                   <div
                     key={msg.id + (msg.created_at || "")}
                     className={`message-row ${msg.role === "user" ? "user-row" : "ai-row"}`}
@@ -1277,7 +1375,6 @@ export default function App() {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   rows={1}
-                  disabled={!!shareToken}
                 />
                 <input
                   type="file"
@@ -1298,7 +1395,7 @@ export default function App() {
                 <button
                   className="send-btn"
                   onClick={handleSend}
-                  disabled={loading || !!shareToken || (!input.trim() && attachedFiles.length === 0)}
+                  disabled={loading || (!input.trim() && attachedFiles.length === 0)}
                 >
                   {loading ? "..." : editingMessageId ? "Resend" : "Send"}
                 </button>
