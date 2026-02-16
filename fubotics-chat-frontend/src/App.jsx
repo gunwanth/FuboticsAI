@@ -79,6 +79,7 @@ axios.interceptors.response.use(
 );
 
 export default function App() {
+  const initialShareToken = new URLSearchParams(window.location.search).get("share");
   const [sessions, setSessions] = useState([]);
   const [token, setToken] = useState(localStorage.getItem("accessToken") || null);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
@@ -98,7 +99,54 @@ export default function App() {
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
+  const [shareToken, setShareToken] = useState(initialShareToken);
+  const [sharedView, setSharedView] = useState({ loading: false, error: "", session: null, messages: [] });
+  const [showAuthScreen, setShowAuthScreen] = useState(false);
+  const [pendingContinueShared, setPendingContinueShared] = useState(false);
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    const syncShareToken = () => {
+      const p = new URLSearchParams(window.location.search).get("share");
+      setShareToken(p);
+    };
+    window.addEventListener("popstate", syncShareToken);
+    return () => window.removeEventListener("popstate", syncShareToken);
+  }, []);
+
+  useEffect(() => {
+    if (!shareToken) return;
+    const loadShared = async () => {
+      setSharedView({ loading: true, error: "", session: null, messages: [] });
+      try {
+        const res = await axios.get(`${API_BASE}/api/public/share/${shareToken}`);
+        setSharedView({
+          loading: false,
+          error: "",
+          session: res.data?.session || null,
+          messages: res.data?.messages || [],
+        });
+      } catch (err) {
+        setSharedView({
+          loading: false,
+          error: err.response?.data?.error || "Failed to load shared chat",
+          session: null,
+          messages: [],
+        });
+      }
+    };
+    loadShared();
+  }, [shareToken]);
+
+  useEffect(() => {
+    if (!token || !pendingContinueShared || !shareToken) return;
+    const run = async () => {
+      await continueSharedChatWithCurrentAuth();
+      setPendingContinueShared(false);
+      setShowAuthScreen(false);
+    };
+    run();
+  }, [token, pendingContinueShared, shareToken]);
 
   useEffect(() => {
     const bootstrapAuth = async () => {
@@ -273,30 +321,39 @@ export default function App() {
   }
 
   async function handleNewChat() {
-    try {
-      const defaultName = `Chat ${sessions.length + 1}`;
-      const userInput = window.prompt("Enter chat name (optional):", defaultName);
+    setSelectedSessionId(null);
+    setMessages([]);
+    setAttachedFiles([]);
+    setPendingAttachmentIds([]);
+    setInput("");
+    setEditingMessageId(null);
+    setOpenSessionMenuId(null);
+    setPendingDeleteSessionId(null);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("session");
+    window.history.replaceState({}, "", nextUrl.toString());
 
-      if (userInput === null) return;
-
-      const name = userInput.trim() === "" ? defaultName : userInput.trim();
-
-      const res = await axios.post(`${API_BASE}/api/sessions`, { name });
-      const newSession = res.data.session;
-
-      setSessions((prev) => [newSession, ...prev]);
-      setSelectedSessionId(newSession.id);
-      setMessages([]);
-      setAttachedFiles([]);
-      setPendingAttachmentIds([]);
-      
-      if (window.innerWidth <= 768) {
-        setSidebarVisible(false);
-      }
-    } catch (err) {
-      console.error("Error creating session", err);
-      alert("Failed to create chat");
+    if (window.innerWidth <= 768) {
+      setSidebarVisible(false);
     }
+  }
+
+  async function ensureSessionForMessage(firstPrompt) {
+    if (selectedSessionId) return selectedSessionId;
+    const res = await axios.post(`${API_BASE}/api/sessions/auto`, {
+      firstPrompt: String(firstPrompt || "").trim(),
+    });
+    const newSession = res.data?.session;
+    if (!newSession?.id) throw new Error("Could not create session");
+    setSessions((prev) => [newSession, ...prev]);
+    setSelectedSessionId(newSession.id);
+    setMessages([]);
+    setAttachedFiles([]);
+    setPendingAttachmentIds([]);
+    if (window.innerWidth <= 768) {
+      setSidebarVisible(false);
+    }
+    return newSession.id;
   }
 
   async function handleDeleteSession(sessionId) {
@@ -334,9 +391,19 @@ export default function App() {
   async function handleShareSession(session, e) {
     e.stopPropagation();
     setOpenSessionMenuId(null);
-    const url = new URL(window.location.href);
-    url.searchParams.set("session", String(session.id));
-    const shareUrl = url.toString();
+    let shareUrl = "";
+    try {
+      const res = await axios.post(`${API_BASE}/api/sessions/${session.id}/share`);
+      shareUrl = res.data?.shareUrl || "";
+    } catch (err) {
+      console.error("Share token creation failed", err);
+    }
+    if (!shareUrl) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("session");
+      url.searchParams.set("share", String(session.id));
+      shareUrl = url.toString();
+    }
     const nativeShareSupported = typeof navigator !== "undefined" && typeof navigator.share === "function";
     const clipboardSupported = typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function";
 
@@ -385,6 +452,52 @@ export default function App() {
     window.prompt("Copy this chat link:", shareUrl);
   }
 
+  async function handleRenameSession(session, e) {
+    e.stopPropagation();
+    setOpenSessionMenuId(null);
+    const nextName = window.prompt("Rename chat:", session.name || `Chat ${session.id}`);
+    if (nextName === null) return;
+    const clean = nextName.trim();
+    if (!clean) return;
+    try {
+      const res = await axios.put(`${API_BASE}/api/sessions/${session.id}`, { name: clean });
+      const updated = res.data?.session;
+      if (!updated) return;
+      setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, name: updated.name } : s)));
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to rename chat");
+    }
+  }
+
+  async function handleContinueSharedChat() {
+    if (!shareToken) return;
+    if (!token) {
+      setPendingContinueShared(true);
+      setShowAuthScreen(true);
+      return;
+    }
+    await continueSharedChatWithCurrentAuth();
+  }
+
+  async function continueSharedChatWithCurrentAuth() {
+    if (!shareToken) return;
+    try {
+      const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/continue`);
+      const newSessionId = res.data?.session?.id;
+      if (!newSessionId) return;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("share");
+      url.searchParams.set("session", String(newSessionId));
+      window.history.replaceState({}, "", url.toString());
+      setShareToken(null);
+      await fetchSessions();
+      setSelectedSessionId(newSessionId);
+      setMessages(res.data?.messages || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to continue shared chat");
+    }
+  }
+
   // Handle file attachment selection
   async function handleFileAttachment(event) {
     const files = Array.from(event.target.files);
@@ -428,10 +541,6 @@ export default function App() {
 
   async function handleSend() {
     if ((!input.trim() && attachedFiles.length === 0) || loading) return;
-    if (!selectedSessionId) {
-      alert("Please create a chat first");
-      return;
-    }
 
     const text = input.trim() || "(Sent files)";
     setLoading(true);
@@ -474,8 +583,9 @@ export default function App() {
 
     setIsTyping(true);
     try {
+      const targetSessionId = await ensureSessionForMessage(text);
       const res = await axios.post(`${API_BASE}/api/messages`, {
-        sessionId: selectedSessionId,
+        sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
@@ -870,7 +980,7 @@ export default function App() {
 
   return (
     <div className="app">
-      {!token ? (
+      {!token && (!shareToken || showAuthScreen) ? (
         <div className="layout">
           <AuthScreen />
         </div>
@@ -923,9 +1033,10 @@ export default function App() {
                   {openSessionMenuId === session.id && (
                     <div className="session-menu" onClick={(e) => e.stopPropagation()}>
                       <>
-                        <button onClick={(e) => handleShareSession(session, e)}>Share Chat</button>
-                        <button
-                          className="danger"
+                          <button onClick={(e) => handleShareSession(session, e)}>Share Chat</button>
+                          <button onClick={(e) => handleRenameSession(session, e)}>Rename Chat</button>
+                          <button
+                            className="danger"
                           onClick={(e) => {
                             e.stopPropagation();
                             setOpenSessionMenuId(null);
@@ -1025,7 +1136,27 @@ export default function App() {
             </header>
 
             <div className="chat-window" ref={chatWindowRef}>
-              {!selectedSessionId && (
+              {shareToken && sharedView.loading && (
+                <div className="empty-state"><div className="empty-state-content"><p>Loading shared chat...</p></div></div>
+              )}
+              {shareToken && sharedView.error && (
+                <div className="empty-state"><div className="empty-state-content"><p>{sharedView.error}</p></div></div>
+              )}
+              {shareToken && !sharedView.loading && !sharedView.error &&
+                sharedView.messages.map((msg) => (
+                  <div
+                    key={msg.id + (msg.created_at || "")}
+                    className={`message-row ${msg.role === "user" ? "user-row" : "ai-row"}`}
+                  >
+                    <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
+                    <div className="bubble">
+                      <div className="sender">{msg.role === "user" ? "You" : "Fubotics AI"}</div>
+                      <div className="content">{renderMessageContent(msg.content)}</div>
+                    </div>
+                  </div>
+                ))
+              }
+              {!shareToken && !selectedSessionId && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Start</div>
@@ -1035,7 +1166,7 @@ export default function App() {
                 </div>
               )}
 
-              {selectedSessionId && messages.length === 0 && (
+              {!shareToken && selectedSessionId && messages.length === 0 && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Hi</div>
@@ -1045,7 +1176,7 @@ export default function App() {
                 </div>
               )}
 
-              {selectedSessionId &&
+              {!shareToken && selectedSessionId &&
                 messages.map((msg) => (
                   <div
                     key={msg.id + (msg.created_at || "")}
@@ -1084,7 +1215,7 @@ export default function App() {
                   </div>
                 ))}
 
-              {isTyping && (
+              {!shareToken && isTyping && (
                 <div className="message-row ai-row">
                   <div className="message-avatar">AI</div>
                   <div className="typing-indicator">
@@ -1099,6 +1230,13 @@ export default function App() {
             </div>
 
             <div className="input-area" onClick={(e) => e.stopPropagation()}>
+              {shareToken && (
+                <div className="share-continue-row">
+                  <button type="button" className="share-continue-btn" onClick={handleContinueSharedChat}>
+                    Continue this chat
+                  </button>
+                </div>
+              )}
               {editingMessageId && (
                 <div className="edit-banner">
                   Editing previous message
@@ -1128,7 +1266,7 @@ export default function App() {
                 <button
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken}
                   title="Attach files"
                 >
                   📎
@@ -1139,6 +1277,7 @@ export default function App() {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   rows={1}
+                  disabled={!!shareToken}
                 />
                 <input
                   type="file"
@@ -1151,7 +1290,7 @@ export default function App() {
                 <button
                   className="csv-upload-btn"
                   onClick={() => document.getElementById('csv-upload-input').click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken}
                   title="Upload CSV for Analytics"
                 >
                   📊
@@ -1159,7 +1298,7 @@ export default function App() {
                 <button
                   className="send-btn"
                   onClick={handleSend}
-                  disabled={loading || (!input.trim() && attachedFiles.length === 0)}
+                  disabled={loading || !!shareToken || (!input.trim() && attachedFiles.length === 0)}
                 >
                   {loading ? "..." : editingMessageId ? "Resend" : "Send"}
                 </button>

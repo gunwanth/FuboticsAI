@@ -25,6 +25,7 @@ const authController = require("./controllers/authController");
 const chatSessionModel = require("./models/chatSession");
 const messageModel = require("./models/message");
 const attachmentModel = require("./models/attachment");
+const shareChatModel = require("./models/shareChat");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -423,6 +424,31 @@ Return only final content (no meta commentary).`;
     temperature: 0.6,
   });
   return response.choices?.[0]?.message?.content?.trim() || prompt;
+}
+
+async function suggestSessionNameFromPrompt(prompt) {
+  const raw = String(prompt || "").trim();
+  if (!raw) return "New Chat";
+  try {
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: "Generate a short, clear chat title (max 6 words). Return title only." },
+        { role: "user", content: raw },
+      ],
+      max_tokens: 20,
+      temperature: 0.2,
+    });
+    const title = (response.choices?.[0]?.message?.content || "")
+      .replace(/["`]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 60);
+    if (title) return title;
+  } catch (err) {
+    console.warn("Session name suggestion failed:", err.message);
+  }
+  return raw.split(/\s+/).slice(0, 6).join(" ").slice(0, 60) || "New Chat";
 }
 
 function renderAttachmentInsight(analysis) {
@@ -1195,6 +1221,144 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       error: "Failed to send message",
       detail: process.env.NODE_ENV === "production" ? undefined : err.message,
     });
+  }
+});
+
+app.post("/api/sessions/auto", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const firstPrompt = String(req.body?.firstPrompt || "").trim();
+    const suggestedName = await suggestSessionNameFromPrompt(firstPrompt);
+    const session = await chatSessionModel.create(userId, suggestedName || null);
+    res.status(201).json({ session });
+  } catch (err) {
+    console.error("POST /api/sessions/auto error:", err);
+    res.status(500).json({ error: "Failed to auto-create session" });
+  }
+});
+
+app.put("/api/sessions/:id", authMiddleware, async (req, res) => {
+  try {
+    const sessionId = Number.parseInt(req.params.id, 10);
+    const name = String(req.body?.name || "").trim();
+    if (!Number.isInteger(sessionId)) {
+      return res.status(400).json({ error: "Valid session id required" });
+    }
+    if (!name) {
+      return res.status(400).json({ error: "Session name is required" });
+    }
+    const updated = await chatSessionModel.updateName(sessionId, req.user.id, name.slice(0, 255));
+    if (!updated) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    res.json({ session: updated });
+  } catch (err) {
+    console.error("PUT /api/sessions/:id error:", err);
+    res.status(500).json({ error: "Failed to rename session" });
+  }
+});
+
+app.post("/api/sessions/:id/share", authMiddleware, async (req, res) => {
+  try {
+    const sessionId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(sessionId)) {
+      return res.status(400).json({ error: "Valid session id required" });
+    }
+    const session = await chatSessionModel.getById(sessionId, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to share this chat" });
+    }
+
+    let share = await shareChatModel.getBySessionId(sessionId);
+    if (!share) {
+      share = await shareChatModel.create(sessionId, req.user.id);
+    }
+
+    const base = process.env.FRONTEND_PUBLIC_URL || req.headers.origin || "http://localhost:5173";
+    const shareUrl = `${base.replace(/\/$/, "")}/?share=${share.token}`;
+    res.json({ token: share.token, shareUrl });
+  } catch (err) {
+    console.error("POST /api/sessions/:id/share error:", err);
+    res.status(500).json({ error: "Failed to create share link" });
+  }
+});
+
+app.get("/api/public/share/:token", async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ error: "Share token required" });
+    }
+    const share = await shareChatModel.getByToken(token);
+    if (!share) {
+      return res.status(404).json({ error: "Shared chat not found" });
+    }
+
+    const ownerSession = await db.query(
+      "SELECT id, name, created_at FROM chat_sessions WHERE id = $1",
+      [share.session_id]
+    );
+    if (!ownerSession.rows[0]) {
+      return res.status(404).json({ error: "Shared chat not found" });
+    }
+    const messages = await messageModel.getBySessionId(share.session_id);
+    const sanitized = messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      created_at: m.created_at,
+      attachments: Array.isArray(m.attachments)
+        ? m.attachments.map((a) => ({
+            id: a.id,
+            filename: a.filename,
+            file_type: a.file_type,
+          }))
+        : [],
+    }));
+    res.json({
+      session: ownerSession.rows[0],
+      token: share.token,
+      messages: sanitized,
+    });
+  } catch (err) {
+    console.error("GET /api/public/share/:token error:", err);
+    res.status(500).json({ error: "Failed to load shared chat" });
+  }
+});
+
+app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ error: "Share token required" });
+    }
+    const share = await shareChatModel.getByToken(token);
+    if (!share) {
+      return res.status(404).json({ error: "Shared chat not found" });
+    }
+
+    const sourceSessionRes = await db.query(
+      "SELECT id, name FROM chat_sessions WHERE id = $1",
+      [share.session_id]
+    );
+    const sourceSession = sourceSessionRes.rows[0];
+    if (!sourceSession) {
+      return res.status(404).json({ error: "Source chat not found" });
+    }
+
+    const newSession = await chatSessionModel.create(
+      req.user.id,
+      sourceSession.name ? `${sourceSession.name} (shared copy)` : "Shared Chat Copy"
+    );
+    const sourceMessages = await messageModel.getBySessionId(sourceSession.id);
+    for (const m of sourceMessages) {
+      await messageModel.create(newSession.id, m.role, m.content);
+    }
+    const messages = await messageModel.getBySessionId(newSession.id);
+    res.json({ session: newSession, messages });
+  } catch (err) {
+    console.error("POST /api/public/share/:token/continue error:", err);
+    res.status(500).json({ error: "Failed to continue shared chat" });
   }
 });
 

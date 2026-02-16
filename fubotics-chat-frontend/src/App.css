@@ -747,6 +747,39 @@ body {
   cursor: pointer;
 }
 
+.share-view-banner {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin: 10px 14px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #e0ecff, #f5f9ff);
+  border: 1px solid #c7d9ff;
+  color: #27457a;
+  font-size: 0.9rem;
+}
+
+.share-continue-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.share-continue-btn {
+  border: 1px solid #9db8f2;
+  background: #ffffff;
+  color: #1e3a8a;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.share-continue-btn:hover {
+  background: #eef4ff;
+}
+
 /* Code blocks */
 .code-block {
   margin: 1rem 0;

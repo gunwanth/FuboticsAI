@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS message_attachments (
   UNIQUE(message_id, attachment_id)
 );
 
+CREATE TABLE IF NOT EXISTS shared_chats (
+  id SERIAL PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  token UUID NOT NULL DEFAULT uuid_generate_v4(),
+  created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(token),
+  UNIQUE(session_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
@@ -106,6 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_attachments_is_generated ON attachments(is_genera
 
 CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment_id ON message_attachments(attachment_id);
+CREATE INDEX IF NOT EXISTS idx_shared_chats_token ON shared_chats(token);
+CREATE INDEX IF NOT EXISTS idx_shared_chats_session_id ON shared_chats(session_id);
 
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
