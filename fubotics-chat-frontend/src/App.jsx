@@ -96,6 +96,8 @@ export default function App() {
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
   const [editingMessageId, setEditingMessageId] = useState(null);
+  const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
+  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -230,9 +232,12 @@ export default function App() {
       setSessions(list);
 
       if (list.length > 0) {
-        const first = list[0].id;
-        setSelectedSessionId(first);
-        await fetchMessages(first);
+        const searchParams = new URLSearchParams(window.location.search);
+        const requested = Number.parseInt(searchParams.get("session") || "", 10);
+        const hasRequested = Number.isInteger(requested) && list.some((s) => s.id === requested);
+        const target = hasRequested ? requested : list[0].id;
+        setSelectedSessionId(target);
+        await fetchMessages(target);
       }
     } catch (err) {
       console.error("Error loading sessions", err);
@@ -294,23 +299,29 @@ export default function App() {
     }
   }
 
-  async function handleDeleteSession(sessionId, e) {
-    e.stopPropagation();
-
+  async function handleDeleteSession(sessionId) {
     try {
       await axios.delete(`${API_BASE}/api/sessions/${sessionId}`);
       const remaining = sessions.filter((s) => s.id !== sessionId);
 
       setSessions(remaining);
+      setPendingDeleteSessionId(null);
+      setOpenSessionMenuId(null);
 
       if (selectedSessionId === sessionId) {
         if (remaining.length > 0) {
           const next = remaining[0].id;
           setSelectedSessionId(next);
+          const nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.set("session", String(next));
+          window.history.replaceState({}, "", nextUrl.toString());
           await fetchMessages(next);
         } else {
           setSelectedSessionId(null);
           setMessages([]);
+          const nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.delete("session");
+          window.history.replaceState({}, "", nextUrl.toString());
         }
         setAttachedFiles([]);
         setPendingAttachmentIds([]);
@@ -318,6 +329,60 @@ export default function App() {
     } catch (err) {
       console.error("Error deleting session", err);
     }
+  }
+
+  async function handleShareSession(session, e) {
+    e.stopPropagation();
+    setOpenSessionMenuId(null);
+    const url = new URL(window.location.href);
+    url.searchParams.set("session", String(session.id));
+    const shareUrl = url.toString();
+    const nativeShareSupported = typeof navigator !== "undefined" && typeof navigator.share === "function";
+    const clipboardSupported = typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function";
+
+    if (nativeShareSupported) {
+      try {
+        await navigator.share({
+          title: session.name || `Chat ${session.id}`,
+          text: "Shared Fubotics chat link",
+          url: shareUrl,
+        });
+        return;
+      } catch (err) {
+        // Continue to clipboard/prompt fallback if user cancels or share is unavailable.
+        console.warn("Native share failed, trying fallback:", err?.message || err);
+      }
+    }
+
+    if (clipboardSupported) {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        alert("Chat link copied to clipboard");
+        return;
+      } catch (err) {
+        console.warn("Clipboard API failed, trying legacy copy:", err?.message || err);
+      }
+    }
+
+    try {
+      const input = document.createElement("textarea");
+      input.value = shareUrl;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.focus();
+      input.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(input);
+      if (ok) {
+        alert("Chat link copied to clipboard");
+        return;
+      }
+    } catch (err) {
+      console.warn("Legacy copy failed:", err?.message || err);
+    }
+
+    window.prompt("Copy this chat link:", shareUrl);
   }
 
   // Handle file attachment selection
@@ -458,6 +523,7 @@ export default function App() {
   }
 
   function handleChatAreaClick() {
+    setOpenSessionMenuId(null);
     if (window.innerWidth <= 768 && sidebarVisible) {
       setSidebarVisible(false);
     }
@@ -536,6 +602,11 @@ export default function App() {
 
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
+    setOpenSessionMenuId(null);
+    setPendingDeleteSessionId(null);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("session", String(sessionId));
+    window.history.replaceState({}, "", nextUrl.toString());
     fetchMessages(sessionId);
     setAttachedFiles([]);
     setPendingAttachmentIds([]);
@@ -837,13 +908,36 @@ export default function App() {
                 <span className="session-name">
                   {session.name ? session.name : `Chat ${session.id}`}
                 </span>
-                <button
-                  className="delete-session-btn"
-                  onClick={(e) => handleDeleteSession(session.id, e)}
-                  title="Delete chat"
-                >
-                  ×
-                </button>
+                <div className="session-actions">
+                  <button
+                    className="session-menu-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPendingDeleteSessionId(null);
+                      setOpenSessionMenuId((prev) => (prev === session.id ? null : session.id));
+                    }}
+                    title="Chat actions"
+                  >
+                    ...
+                  </button>
+                  {openSessionMenuId === session.id && (
+                    <div className="session-menu" onClick={(e) => e.stopPropagation()}>
+                      <>
+                        <button onClick={(e) => handleShareSession(session, e)}>Share Chat</button>
+                        <button
+                          className="danger"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenSessionMenuId(null);
+                            setPendingDeleteSessionId(session.id);
+                          }}
+                        >
+                          Delete Chat
+                        </button>
+                      </>
+                    </div>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -857,6 +951,35 @@ export default function App() {
 
         {sidebarVisible && window.innerWidth <= 768 && (
           <div className="sidebar-overlay" onClick={() => setSidebarVisible(false)} />
+        )}
+
+        {pendingDeleteSessionId && (
+          <div
+            className="delete-chat-modal-overlay"
+            onClick={() => setPendingDeleteSessionId(null)}
+          >
+            <div
+              className="delete-chat-modal"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3>Delete Chat</h3>
+              <p>Are you sure to delete this chat</p>
+              <div className="delete-chat-modal-actions">
+                <button
+                  className="confirm-btn"
+                  onClick={() => handleDeleteSession(pendingDeleteSessionId)}
+                >
+                  Yes
+                </button>
+                <button
+                  className="cancel-btn"
+                  onClick={() => setPendingDeleteSessionId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''} ${filesSidebarVisible ? 'files-open' : ''}`} onClick={handleChatAreaClick}>
@@ -1148,3 +1271,4 @@ export default function App() {
     </div>
   );
 }
+

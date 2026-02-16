@@ -272,30 +272,169 @@ body {
   font-size: 0.95rem;
 }
 
-.delete-session-btn {
-  background: rgba(255, 0, 0, 0.2);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  width: 28px;
-  height: 28px;
-  cursor: pointer;
-  opacity: 0;
-  transition: all 0.2s;
-  font-size: 1.2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.session-actions {
+  position: relative;
   flex-shrink: 0;
 }
 
-.session-item:hover .delete-session-btn {
+.session-menu-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  width: 32px;
+  height: 28px;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: all 0.2s;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-item:hover .session-menu-btn,
+.session-menu-btn:focus-visible {
   opacity: 1;
 }
 
-.delete-session-btn:hover {
-  background: rgba(255, 0, 0, 0.4);
-  transform: scale(1.1);
+.session-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.session-menu {
+  position: absolute;
+  right: 0;
+  top: 34px;
+  min-width: 180px;
+  background: #ffffff;
+  color: #1f2937;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.2);
+  overflow: hidden;
+  z-index: 15;
+}
+
+.session-menu button {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #1f2937;
+}
+
+.session-menu button:hover {
+  background: #f3f6fb;
+}
+
+.session-menu button.danger {
+  color: #b91c1c;
+}
+
+.delete-chat-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  animation: fadeInOverlay 0.2s ease;
+}
+
+.delete-chat-modal {
+  width: min(92vw, 430px);
+  border-radius: 16px;
+  padding: 20px 18px 16px;
+  background: linear-gradient(120deg, #ffffff, #f8fbff, #fff7f0, #ffffff);
+  background-size: 250% 250%;
+  border: 1px solid rgba(100, 116, 139, 0.35);
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35);
+  animation: modalPop 0.18s ease-out, modalColorFlow 8s ease infinite;
+}
+
+.delete-chat-modal h3 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+  color: #0f172a;
+}
+
+.delete-chat-modal p {
+  margin: 0 0 16px;
+  color: #334155;
+  font-size: 0.93rem;
+}
+
+.delete-chat-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.delete-chat-modal-actions button {
+  border-radius: 10px;
+  border: 1px solid #d1d9e6;
+  padding: 8px 14px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.delete-chat-modal-actions .confirm-btn {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #fff;
+}
+
+.delete-chat-modal-actions .confirm-btn:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.delete-chat-modal-actions .cancel-btn {
+  background: #fff;
+  color: #0f172a;
+}
+
+.delete-chat-modal-actions .cancel-btn:hover {
+  background: #f8fafc;
+}
+
+@keyframes modalColorFlow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes modalPop {
+  from {
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeInOverlay {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .sidebar-footer {
