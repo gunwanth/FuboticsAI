@@ -105,6 +105,8 @@ export default function App() {
   const [pendingContinueShared, setPendingContinueShared] = useState(false);
   const [authIntentMode, setAuthIntentMode] = useState("login");
   const [sharedMessages, setSharedMessages] = useState([]);
+  const [anonymousMessages, setAnonymousMessages] = useState([]);
+  const [anonymousQuestionCount, setAnonymousQuestionCount] = useState(0);
   const [anonymousSharedQuestionCount, setAnonymousSharedQuestionCount] = useState(0);
   const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
   const fileInputRef = useRef(null);
@@ -147,6 +149,7 @@ export default function App() {
 
   useEffect(() => {
     setAnonymousSharedQuestionCount(0);
+    setAnonymousQuestionCount(0);
     setSharedLimitModal(null);
   }, [shareToken]);
 
@@ -238,6 +241,7 @@ export default function App() {
         if (t) {
           setToken(t);
           setShowAuthScreen(false);
+          setSharedLimitModal(null);
           setLocalUser("");
           setLocalPass("");
         }
@@ -524,6 +528,7 @@ export default function App() {
 
   function openAuthFor(mode) {
     setAuthIntentMode(mode);
+    setSharedLimitModal(null);
     if (shareToken && !token) {
       setPendingContinueShared(true);
     }
@@ -576,7 +581,11 @@ export default function App() {
 
     const text = input.trim() || "(Sent files)";
     const isAnonymousSharedMode = !!shareToken && !token;
-    if (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) {
+    const isAnonymousPublicMode = !token && !shareToken;
+    if (
+      (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) ||
+      (isAnonymousPublicMode && anonymousQuestionCount >= 15)
+    ) {
       setSharedLimitModal("hard");
       return;
     }
@@ -605,13 +614,15 @@ export default function App() {
     setInput("");
 
     // Optimistic UI
-    const tempMsg = { 
-      id: Date.now(), 
-      role: "user", 
+    const tempMsg = {
+      id: Date.now(),
+      role: "user",
       content: text,
       attachments: attachedFiles.map(f => ({ filename: f.name }))
     };
-    setMessages((prev) => [...prev, tempMsg]);
+    if (!isAnonymousSharedMode && !isAnonymousPublicMode) {
+      setMessages((prev) => [...prev, tempMsg]);
+    }
 
     // Clear attached files from UI
     const attachmentIdsToSend = [...pendingAttachmentIds];
@@ -642,6 +653,28 @@ export default function App() {
         return;
       }
 
+      if (isAnonymousPublicMode) {
+        const tempUser = { id: Date.now(), role: "user", content: text };
+        setAnonymousMessages((prev) => [...prev, tempUser]);
+        const historyForApi = [...anonymousMessages, tempUser].map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const res = await axios.post(`${API_BASE}/api/public/chat`, {
+          content: text,
+          history: historyForApi,
+        });
+        const assistant = String(res.data?.assistant || "").trim() || "No reply";
+        setAnonymousMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
+
+        const nextCount = anonymousQuestionCount + 1;
+        setAnonymousQuestionCount(nextCount);
+        if (nextCount === 10) setSharedLimitModal("soft");
+        if (nextCount >= 15) setSharedLimitModal("hard");
+        setInput("");
+        return;
+      }
+
       const targetSessionId = await ensureSessionForMessage(text);
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: targetSessionId,
@@ -652,14 +685,26 @@ export default function App() {
       setMessages(res.data.messages || []);
     } catch (err) {
       console.error("Send error", err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          role: "assistant",
-          content: "Error talking to server",
-        },
-      ]);
+      if (isAnonymousSharedMode) {
+        setSharedMessages((prev) => [
+          ...prev,
+          { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
+        ]);
+      } else if (isAnonymousPublicMode) {
+        setAnonymousMessages((prev) => [
+          ...prev,
+          { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now() + 1,
+            role: "assistant",
+            content: "Error talking to server",
+          },
+        ]);
+      }
     } finally {
       setLoading(false);
       setIsTyping(false);
@@ -1039,11 +1084,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {!token && !shareToken ? (
-        <div className="layout">
-          <AuthScreen />
-        </div>
-      ) : (
       <div className="layout">
 
         <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
@@ -1059,7 +1099,15 @@ export default function App() {
           </div>
 
           <div className="session-list">
-            {sessions.length === 0 && (
+            {!token && !shareToken && (
+              <div className="empty-sessions">
+                <div className="empty-icon">Guest</div>
+                <p>Anonymous chat mode</p>
+                <small>Login for deep search, files, and saved chats</small>
+              </div>
+            )}
+
+            {token && sessions.length === 0 && (
               <div className="empty-sessions">
                 <div className="empty-icon">Chat</div>
                 <p>No chats yet</p>
@@ -1067,7 +1115,7 @@ export default function App() {
               </div>
             )}
 
-            {sessions.map((session) => (
+            {token && sessions.map((session) => (
               <div
                 key={session.id}
                 className={`session-item ${session.id === selectedSessionId ? 'active' : ''}`}
@@ -1113,9 +1161,15 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
-            <button className="logout-btn" onClick={handleLogout}>
-              <span>↪</span> Logout
-            </button>
+            {token ? (
+              <button className="logout-btn" onClick={handleLogout}>
+                <span>&#8634;</span> Logout
+              </button>
+            ) : (
+              <button className="logout-btn" onClick={() => openAuthFor("login")}>
+                <span>&#8634;</span> Login
+              </button>
+            )}
           </div>
         </aside>
 
@@ -1181,7 +1235,7 @@ export default function App() {
           </div>
         )}
 
-        {!token && shareToken && showAuthScreen && (
+        {!token && showAuthScreen && (
           <div className="auth-modal-overlay" onClick={() => { setShowAuthScreen(false); setPendingContinueShared(false); }}>
             <div className="auth-modal-content" onClick={(e) => e.stopPropagation()}>
               <AuthScreen />
@@ -1213,7 +1267,7 @@ export default function App() {
                 <button
                   className={`deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
                   onClick={() => setDeepSearchEnabled((prev) => !prev)}
-                  disabled={!!shareToken && !token}
+                  disabled={!token}
                   title="Use deep web research for next message"
                 >
                   {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
@@ -1221,7 +1275,7 @@ export default function App() {
                 <button 
                   className="files-toggle-btn"
                   onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
-                  disabled={!!shareToken && !token}
+                  disabled={!token}
                   title="Toggle Files"
                 >
                   📁 Files
@@ -1254,7 +1308,30 @@ export default function App() {
                   </div>
                 ))
               }
-              {!shareToken && !selectedSessionId && (
+              {!token && !shareToken && anonymousMessages.length === 0 && (
+                <div className="empty-state">
+                  <div className="empty-state-content">
+                    <div className="empty-state-icon">Start</div>
+                    <h2>Welcome to Fubotics AI</h2>
+                    <p>Anonymous chat mode active. Login to unlock full features.</p>
+                  </div>
+                </div>
+              )}
+              {!token && !shareToken &&
+                anonymousMessages.map((msg) => (
+                  <div
+                    key={msg.id + (msg.created_at || "")}
+                    className={`message-row ${msg.role === "user" ? "user-row" : "ai-row"}`}
+                  >
+                    <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
+                    <div className="bubble">
+                      <div className="sender">{msg.role === "user" ? "You" : "Fubotics AI"}</div>
+                      <div className="content">{renderMessageContent(msg.content)}</div>
+                    </div>
+                  </div>
+                ))
+              }
+              {token && !shareToken && !selectedSessionId && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Start</div>
@@ -1264,7 +1341,7 @@ export default function App() {
                 </div>
               )}
 
-              {!shareToken && selectedSessionId && messages.length === 0 && (
+              {token && !shareToken && selectedSessionId && messages.length === 0 && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Hi</div>
@@ -1274,7 +1351,7 @@ export default function App() {
                 </div>
               )}
 
-              {!shareToken && selectedSessionId &&
+              {token && !shareToken && selectedSessionId &&
                 messages.map((msg) => (
                   <div
                     key={msg.id + (msg.created_at || "")}
@@ -1364,7 +1441,7 @@ export default function App() {
                 <button
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken || !token}
                   title="Attach files"
                 >
                   📎
@@ -1387,7 +1464,7 @@ export default function App() {
                 <button
                   className="csv-upload-btn"
                   onClick={() => document.getElementById('csv-upload-input').click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken}
+                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken || !token}
                   title="Upload CSV for Analytics"
                 >
                   📊
@@ -1503,8 +1580,9 @@ export default function App() {
           )}
         </main>
       </div>
-      )}
     </div>
   );
 }
+
+
 

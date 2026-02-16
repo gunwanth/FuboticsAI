@@ -1399,6 +1399,26 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
   }
 });
 
+app.post("/api/public/chat", async (req, res) => {
+  try {
+    const content = String(req.body?.content || "").trim();
+    const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    if (!content) return res.status(400).json({ error: "Message content is required" });
+
+    const sanitizedHistory = history
+      .filter((m) => m && (m.role === "user" || m.role === "assistant" || m.role === "system"))
+      .map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 12000) }))
+      .slice(-30);
+    sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
+
+    const assistant = await getAIReply(sanitizedHistory, [], [], "");
+    res.json({ assistant });
+  } catch (err) {
+    console.error("POST /api/public/chat error:", err);
+    res.status(500).json({ error: "Failed to process anonymous chat message" });
+  }
+});
+
 app.put("/api/messages/:id", authMiddleware, async (req, res) => {
   try {
     const messageId = Number.parseInt(req.params.id, 10);
