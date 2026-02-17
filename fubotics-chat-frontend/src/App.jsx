@@ -109,6 +109,8 @@ export default function App() {
   const [anonymousQuestionCount, setAnonymousQuestionCount] = useState(0);
   const [anonymousSharedQuestionCount, setAnonymousSharedQuestionCount] = useState(0);
   const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
+  const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const copyResetTimerRef = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -203,6 +205,14 @@ export default function App() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, [sidebarVisible]);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (token) {
@@ -754,8 +764,21 @@ export default function App() {
     }
   }
 
-  function handleCopy(text) {
-    navigator.clipboard.writeText(text);
+  async function handleCopy(text, key = null) {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (key) {
+        setCopiedCodeKey(key);
+        if (copyResetTimerRef.current) {
+          clearTimeout(copyResetTimerRef.current);
+        }
+        copyResetTimerRef.current = setTimeout(() => {
+          setCopiedCodeKey(null);
+        }, 5000);
+      }
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
   }
 
   function handleChatAreaClick() {
@@ -850,12 +873,13 @@ export default function App() {
         );
       }
 
+      const copyKey = `code-${idx}-${block.index}`;
       elements.push(
         <div className="code-block" key={`code-${idx}`}>
           <div className="code-header">
             <span className="code-language">{block.language}</span>
-            <button className="copy-btn" onClick={() => handleCopy(block.code)}>
-              Copy
+            <button className="copy-btn" onClick={() => handleCopy(block.code, copyKey)}>
+              {copiedCodeKey === copyKey ? "Copied" : "Copy"}
             </button>
           </div>
           <pre><code>{block.code}</code></pre>

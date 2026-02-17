@@ -233,7 +233,7 @@ Main file:
 ### Important async handlers
 - `handleSend()`: routes message by context (auth/share/anonymous).
 - `continueSharedChatWithCurrentAuth()`: carries share history into account.
-- `handleFileAttachment()` / `handleFileUpload()`: upload pipelines.
+- `handleFileAttachment()`: unified upload pipeline (normal files + CSV analytics trigger).
 - `handleDownload...()`: file retrieval.
 
 ### Anonymous gating logic
@@ -380,4 +380,86 @@ Implemented automations:
 3. Add centralized structured logging for production incidents.
 4. Add rate limits for public anonymous routes.
 5. Add monitoring dashboards for error rate and route latency.
+
+---
+
+## 17. Latest Update Pack (UI + CORS + Upload Flow)
+
+This section documents the latest changes made after the original migration notes.
+
+### A) Frontend UI/UX updates
+- Rebranded visible product name to `NexaCore AI`.
+- Switched to dark/greyscale gradient visual direction.
+- Made chat area full-width and added landing-mode layout:
+  - centered title `What can I help with?`
+  - centered rounded input bar in initial state
+  - input returns to standard lower position after first message
+- Changed conversation styling:
+  - user messages use grey/black bubble style
+  - assistant replies render directly on chat space (no boxed bubble)
+- Removed green icon boxes near branding labels.
+- 3-dot chat menu button hidden by default and visible on hover/focus.
+
+### B) Frontend behavior updates
+- Unified `+` upload flow:
+  - normal files + CSV analytics from one button
+  - removed dedicated CSV upload button from input bar
+  - CSV files now also trigger `/api/upload-data` automatically
+- Initial-stage upload support:
+  - if no chat exists yet, app auto-creates a session before upload
+- Share/auth/anonymous flows retained with limits:
+  - soft prompt at 10, hard lock at 15
+
+### C) Backend CORS hardening updates
+- CORS allowlist updated with:
+  - `https://nexacore-ai.vercel.app`
+  - `https://www.nexacore-ai.vercel.app`
+- Added robust origin normalization:
+  - lowercase normalize
+  - trailing slash removal
+- Applied normalization in both:
+  - CORS `origin` callback
+  - manual `OPTIONS` preflight handling
+
+### D) Docs and environment updates
+- Updated backend examples and defaults for new frontend domain.
+- Added and maintained this runbook as the main operational reference.
+
+---
+
+## 18. Updated Routes/Pipeline Notes
+
+No new protected core CRUD route was added in this cycle, but behavior changed for existing public flows:
+
+### Public/anonymous behavior now
+- `POST /api/public/chat` remains the anonymous base chat endpoint.
+- `POST /api/public/share/:token/chat` remains anonymous shared-chat endpoint.
+- Frontend now routes initial/no-login homepage to anonymous chat UX directly.
+
+### Upload pipeline now
+- Primary upload entry remains `POST /api/attachments`.
+- If uploaded file is CSV, frontend additionally calls `POST /api/upload-data`.
+- Session can be auto-created before upload if none is selected.
+
+---
+
+## 19. Git Commands Used (Recent Work Log)
+
+These are the main Git commands used repeatedly during this implementation cycle:
+
+```powershell
+git status --short --branch
+git diff --name-only
+git diff -- <path>
+git add <file1> <file2> ...
+git commit -m "message"
+git push origin main
+git remote -v
+```
+
+Representative commit messages used in this cycle:
+- `Fix shared-link anonymous flow and auth continuation`
+- `Enable anonymous base chat and fix auth lock modal close`
+- `Refine dark UI, landing layout, and initial file upload flow`
+- `Update frontend domain to nexacore-ai.vercel.app`
 

@@ -34,6 +34,7 @@ const PORT = process.env.PORT || 5000;
 const defaultOrigins = [
   "http://localhost:5173",
   "https://nexacore-ai.vercel.app",
+  "https://www.nexacore-ai.vercel.app",
   "https://fuboticsai.onrender.com"
 ];
 
@@ -41,7 +42,15 @@ const envList = process.env.FRONTEND_ORIGINS
   ? process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
   : [];
 
-const ALLOWED_ORIGINS = Array.from(new Set([...envList, ...defaultOrigins]));
+function normalizeOrigin(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  return raw.replace(/\/+$/, "");
+}
+
+const ALLOWED_ORIGINS = Array.from(
+  new Set([...envList, ...defaultOrigins].map(normalizeOrigin).filter(Boolean))
+);
 
 app.use(express.json());
 
@@ -95,7 +104,8 @@ const chatUpload = multer({
 app.use(cors({
   origin: function(origin, callback) {
     if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (ALLOWED_ORIGINS.includes(normalizedOrigin)) return callback(null, true);
     return callback(new Error("CORS origin denied: " + origin));
   },
   methods: ["GET", "POST", "PUT", "OPTIONS", "DELETE"],
@@ -106,7 +116,8 @@ app.use(cors({
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     const origin = req.headers.origin || "";
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (!origin || ALLOWED_ORIGINS.includes(normalizedOrigin)) {
       res.header("Access-Control-Allow-Origin", origin || "*");
       res.header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS,DELETE");
       res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
