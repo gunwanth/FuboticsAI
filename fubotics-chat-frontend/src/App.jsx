@@ -255,8 +255,8 @@ export default function App() {
       <div className="auth-screen">
         <div className="auth-card">
           <div className="auth-logo">
-            <div className="logo-icon">AI</div>
-            <h2>Fubotics AI</h2>
+            <div className="logo-icon" aria-hidden="true"></div>
+            <h2>NexaCore AI</h2>
           </div>
           <h3>{localMode === "login" ? "Welcome Back" : "Create Account"}</h3>
           <form onSubmit={handleLocalSubmit} className="auth-form">
@@ -539,28 +539,50 @@ export default function App() {
   async function handleFileAttachment(event) {
     const files = Array.from(event.target.files);
     if (files.length === 0) return;
-    if (!selectedSessionId) {
-      alert("Please create a chat first");
-      return;
+    let targetSessionId = selectedSessionId;
+    if (!targetSessionId) {
+      try {
+        targetSessionId = await ensureSessionForMessage("File upload");
+      } catch (err) {
+        console.error("Session auto-create for file upload failed:", err);
+        alert("Failed to create chat for file upload");
+        return;
+      }
     }
 
     setUploading(true);
     const formData = new FormData();
-    formData.append('sessionId', selectedSessionId);
+    formData.append('sessionId', targetSessionId);
     files.forEach(file => {
       formData.append('files', file);
     });
 
     try {
       const response = await axios.post(`${API_BASE}/api/attachments`, formData);
-      
+
       setAttachedFiles(prev => [...prev, ...files.map((f, idx) => ({
         name: f.name,
         id: response.data.attachmentIds[idx]
       }))]);
-      
+
       setPendingAttachmentIds(prev => [...prev, ...response.data.attachmentIds]);
-      
+
+      const csvFiles = files.filter((f) =>
+        f.type === "text/csv" || String(f.name || "").toLowerCase().endsWith(".csv")
+      );
+
+      if (csvFiles.length > 0) {
+        for (const csvFile of csvFiles) {
+          const csvFormData = new FormData();
+          csvFormData.append('file', csvFile);
+          csvFormData.append('sessionId', targetSessionId);
+          await axios.post(`${API_BASE}/api/upload-data`, csvFormData);
+        }
+        const attRes = await axios.get(`${API_BASE}/api/attachments`, {
+          params: { sessionId: targetSessionId },
+        });
+        setSessionAttachments(attRes.data.attachments || []);
+      }
     } catch (error) {
       console.error('Upload error:', error);
       alert('Failed to upload files: ' + (error.response?.data?.error || error.message));
@@ -740,39 +762,6 @@ export default function App() {
     setOpenSessionMenuId(null);
     if (window.innerWidth <= 768 && sidebarVisible) {
       setSidebarVisible(false);
-    }
-  }
-
-  async function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    
-    if (!selectedSessionId) {
-      alert("Please create a chat first");
-      return;
-    }
-
-    setUploading(true);
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('sessionId', selectedSessionId);
-
-    try {
-      const response = await axios.post(`${API_BASE}/api/upload-data`, formData);
-      
-      // Refresh session attachments to show new generated files
-      const attRes = await axios.get(`${API_BASE}/api/attachments`, {
-        params: { sessionId: selectedSessionId },
-      });
-      setSessionAttachments(attRes.data.attachments || []);
-      
-      alert('File processed successfully! Check the Generated Files section below.');
-    } catch (error) {
-      console.error('Upload error:', error);
-      alert('Failed to upload and process file: ' + (error.response?.data?.error || error.message));
-    } finally {
-      setUploading(false);
-      event.target.value = '';
     }
   }
 
@@ -1082,6 +1071,13 @@ export default function App() {
     return elements.length > 0 ? elements : <span>{text}</span>;
   }
 
+  const isLandingMode =
+    !shareToken &&
+    (
+      (!token && anonymousMessages.length === 0) ||
+      (token && (!selectedSessionId || (selectedSessionId && messages.length === 0)))
+    );
+
   return (
     <div className="app">
       <div className="layout">
@@ -1089,8 +1085,8 @@ export default function App() {
         <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
           <div className="sidebar-header">
             <div className="brand">
-              <div className="brand-icon">AI</div>
-              <h2>Fubotics AI</h2>
+              <div className="brand-icon" aria-hidden="true"></div>
+              <h2>NexaCore AI</h2>
             </div>
             <button className="new-chat-btn" onClick={handleNewChat}>
               <span className="btn-icon">+</span>
@@ -1125,7 +1121,14 @@ export default function App() {
                 <span className="session-name">
                   {session.name ? session.name : `Chat ${session.id}`}
                 </span>
-                <div className="session-actions">
+                <div
+                  className="session-actions"
+                  onMouseEnter={() => {
+                    setPendingDeleteSessionId(null);
+                    setOpenSessionMenuId(session.id);
+                  }}
+                  onMouseLeave={() => setOpenSessionMenuId((prev) => (prev === session.id ? null : prev))}
+                >
                   <button
                     className="session-menu-btn"
                     onClick={(e) => {
@@ -1243,7 +1246,7 @@ export default function App() {
           </div>
         )}
 
-        <main className={`chat-area ${!sidebarVisible ? 'expanded' : ''} ${filesSidebarVisible ? 'files-open' : ''}`} onClick={handleChatAreaClick}>
+        <main className={`chat-area ${isLandingMode ? 'landing-mode' : ''} ${!sidebarVisible ? 'expanded' : ''} ${filesSidebarVisible ? 'files-open' : ''}`} onClick={handleChatAreaClick}>
           <button 
             className="toggle-sidebar-btn" 
             onClick={(e) => {
@@ -1260,8 +1263,8 @@ export default function App() {
           <div className="chat-column">
             <header className="chat-header">
               <div className="header-content">
-                <div className="header-icon">AI</div>
-                <h1>Fubotics AI</h1>
+                <div className="header-icon" aria-hidden="true"></div>
+                <h1>NexaCore AI</h1>
               </div>
               <div className="header-actions">
                 <button
@@ -1288,6 +1291,9 @@ export default function App() {
             </header>
 
             <div className="chat-window" ref={chatWindowRef}>
+              {isLandingMode && (
+                <div className="hero-title">What can I help with?</div>
+              )}
               {shareToken && sharedView.loading && (
                 <div className="empty-state"><div className="empty-state-content"><p>Loading shared chat...</p></div></div>
               )}
@@ -1302,17 +1308,17 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      <div className="sender">{msg.role === "user" ? "You" : "Fubotics AI"}</div>
+                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
                 ))
               }
-              {!token && !shareToken && anonymousMessages.length === 0 && (
+              {!isLandingMode && !token && !shareToken && anonymousMessages.length === 0 && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Start</div>
-                    <h2>Welcome to Fubotics AI</h2>
+                    <h2>Welcome to NexaCore AI</h2>
                     <p>Anonymous chat mode active. Login to unlock full features.</p>
                   </div>
                 </div>
@@ -1325,23 +1331,23 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      <div className="sender">{msg.role === "user" ? "You" : "Fubotics AI"}</div>
+                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
                 ))
               }
-              {token && !shareToken && !selectedSessionId && (
+              {!isLandingMode && token && !shareToken && !selectedSessionId && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Start</div>
-                    <h2>Welcome to Fubotics AI</h2>
+                    <h2>Welcome to NexaCore AI</h2>
                     <p>Select a chat or create a new one to get started</p>
                   </div>
                 </div>
               )}
 
-              {token && !shareToken && selectedSessionId && messages.length === 0 && (
+              {!isLandingMode && token && !shareToken && selectedSessionId && messages.length === 0 && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Hi</div>
@@ -1362,7 +1368,7 @@ export default function App() {
                     </div>
                     <div className="bubble">
                       <div className="sender">
-                        {msg.role === "user" ? "You" : "Fubotics AI"}
+                        {msg.role === "user" ? "You" : "NexaCore AI"}
                         {msg.role === "user" && (
                           <button
                             className="message-edit-btn"
@@ -1441,40 +1447,24 @@ export default function App() {
                 <button
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken || !token}
-                  title="Attach files"
+                  disabled={uploading || !!editingMessageId || !!shareToken || !token}
+                  title="Upload files and CSV analytics"
                 >
-                  📎
+                  +
                 </button>
                 <textarea
-                  placeholder="Type your message..."
+                  placeholder="Ask anything"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   rows={1}
                 />
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileUpload}
-                  style={{ display: 'none' }}
-                  id="csv-upload-input"
-                  disabled={uploading}
-                />
-                <button
-                  className="csv-upload-btn"
-                  onClick={() => document.getElementById('csv-upload-input').click()}
-                  disabled={uploading || !selectedSessionId || !!editingMessageId || !!shareToken || !token}
-                  title="Upload CSV for Analytics"
-                >
-                  📊
-                </button>
                 <button
                   className="send-btn"
                   onClick={handleSend}
                   disabled={loading || (!input.trim() && attachedFiles.length === 0)}
                 >
-                  {loading ? "..." : editingMessageId ? "Resend" : "Send"}
+                  {loading ? "..." : editingMessageId ? "Resend" : "↗"}
                 </button>
               </div>
             </div>
@@ -1583,6 +1573,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 
