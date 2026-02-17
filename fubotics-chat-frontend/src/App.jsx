@@ -112,6 +112,11 @@ export default function App() {
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const copyResetTimerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const getSessionLabel = (session) => {
+    if (session?.name) return session.name;
+    if (Number.isInteger(session?.session_number)) return `Session ${session.session_number}`;
+    return `Chat ${session?.id}`;
+  };
 
   useEffect(() => {
     const syncShareToken = () => {
@@ -441,7 +446,7 @@ export default function App() {
     if (nativeShareSupported) {
       try {
         await navigator.share({
-          title: session.name || `Chat ${session.id}`,
+          title: getSessionLabel(session),
           text: "Shared Fubotics chat link",
           url: shareUrl,
         });
@@ -486,7 +491,7 @@ export default function App() {
   async function handleRenameSession(session, e) {
     e.stopPropagation();
     setOpenSessionMenuId(null);
-    const nextName = window.prompt("Rename chat:", session.name || `Chat ${session.id}`);
+    const nextName = window.prompt("Rename chat:", getSessionLabel(session));
     if (nextName === null) return;
     const clean = nextName.trim();
     if (!clean) return;
@@ -1143,7 +1148,7 @@ export default function App() {
               >
                 <div className="session-icon">•</div>
                 <span className="session-name">
-                  {session.name ? session.name : `Chat ${session.id}`}
+                  {getSessionLabel(session)}
                 </span>
                 <div
                   className="session-actions"

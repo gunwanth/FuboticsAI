@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS session_logs (
 CREATE TABLE IF NOT EXISTS chat_sessions (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_number INTEGER NOT NULL,
   name VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -127,6 +128,27 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER TABLE chat_sessions
+ADD COLUMN IF NOT EXISTS session_number INTEGER;
+
+WITH ordered AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at ASC, id ASC) AS rn
+  FROM chat_sessions
+)
+UPDATE chat_sessions cs
+SET session_number = ordered.rn
+FROM ordered
+WHERE cs.id = ordered.id
+  AND (cs.session_number IS NULL OR cs.session_number <= 0);
+
+ALTER TABLE chat_sessions
+ALTER COLUMN session_number SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_user_session_number
+ON chat_sessions(user_id, session_number);
 
 DO $$
 BEGIN

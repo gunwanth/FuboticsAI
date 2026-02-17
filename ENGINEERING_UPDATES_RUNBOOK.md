@@ -463,3 +463,85 @@ Representative commit messages used in this cycle:
 - `Refine dark UI, landing layout, and initial file upload flow`
 - `Update frontend domain to nexacore-ai.vercel.app`
 
+---
+
+## 20. Session Numbering and Reordering Update (Latest)
+
+### Problem
+The requested behavior was:
+- sessions should appear as sequential IDs (`Session 1`, `Session 2`, ...)
+- if `Session 1` is deleted, the next session should shift up (`Session 2` becomes `Session 1`)
+
+Using raw database primary key (`chat_sessions.id`) for this behavior is unsafe because primary keys should remain immutable for references, joins, and share/messaging integrity.
+
+### Approach Chosen
+A dual-identifier architecture was implemented:
+- **internal immutable key**: `chat_sessions.id` (system reference key)
+- **user-facing mutable sequence**: `chat_sessions.session_number` (display/order key)
+
+This preserves relational integrity while enabling reordering on delete.
+
+### Schema Changes
+File:
+- `fubotics-chat-backend/database/schema.sql`
+
+Changes:
+1. Added `session_number INTEGER` to `chat_sessions`.
+2. Backfilled existing rows per user using:
+- `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at ASC, id ASC)`
+3. Enforced `NOT NULL` on `session_number`.
+4. Added unique index:
+- `idx_chat_sessions_user_session_number` on `(user_id, session_number)`
+
+Result:
+- each user gets a contiguous and unique session sequence.
+
+### Backend Model Changes
+File:
+- `fubotics-chat-backend/models/chatSession.js`
+
+Create flow:
+1. Start DB transaction.
+2. Lock user row (`SELECT ... FOR UPDATE`) to avoid concurrent numbering race.
+3. Insert new session with `MAX(session_number)+1`.
+4. Commit.
+
+Delete flow:
+1. Start DB transaction.
+2. Lock user row and target session row.
+3. Delete target session.
+4. Shift following sessions down:
+- `UPDATE chat_sessions SET session_number = session_number - 1 WHERE user_id = $1 AND session_number > $2`
+5. Commit.
+
+Read/update flow:
+- session queries now include `session_number`
+- listing order uses `ORDER BY session_number ASC`
+
+### Frontend Labeling Changes
+File:
+- `fubotics-chat-frontend/src/App.jsx`
+
+Added helper:
+- `getSessionLabel(session)`
+
+Display logic:
+1. If custom name exists -> show custom name.
+2. Else if `session_number` exists -> show `Session <number>`.
+3. Fallback -> `Chat <id>`.
+
+Applied this label in:
+- sidebar chat list
+- share title
+- rename default prompt
+
+### Behavior After This Update
+Example for one user:
+1. Create three chats -> `Session 1`, `Session 2`, `Session 3`
+2. Delete `Session 1`
+3. Remaining become -> `Session 1`, `Session 2`
+
+Important:
+- internal IDs do **not** change
+- only user-visible numbering is compacted
+- route parameters and DB references still use stable IDs
