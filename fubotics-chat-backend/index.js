@@ -33,7 +33,7 @@ const PORT = process.env.PORT || 5000;
 // ---------- CORS (dynamic allowlist) ----------
 const defaultOrigins = [
   "http://localhost:5173",
-  "https://fubotics-ai.vercel.app",
+  "https://nexacore-ai.vercel.app",
   "https://fuboticsai.onrender.com"
 ];
 

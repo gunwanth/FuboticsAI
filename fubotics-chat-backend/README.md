@@ -34,7 +34,7 @@ PGDATABASE=fubotics
 PGUSER=postgres
 PGPASSWORD=your_postgres_password
 JWT_SECRET=replace_with_a_long_random_secret
-FRONTEND_ORIGINS=http://localhost:5173
+FRONTEND_ORIGINS=http://localhost:5173,https://nexacore-ai.vercel.app
 GROQ_API_KEY=your_groq_api_key
 ```
 
