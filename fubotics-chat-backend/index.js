@@ -999,7 +999,7 @@ function detectGenerationRequest(content) {
 
 function resolvePreferredChatModel(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (normalized && CHAT_MODELS[normalized]?.enabled) return normalized;
+  if (normalized && CHAT_MODELS[normalized]) return normalized;
   return defaultChatModel;
 }
 
@@ -1074,17 +1074,33 @@ async function getAIReply(history, sessionAttachments = [], webSources = [], ext
 
     const maxTokens = webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
     const selectedModel = resolvePreferredChatModel(preferredModel);
+    const selectedConfig = CHAT_MODELS[selectedModel];
+
+    if (!selectedConfig?.enabled) {
+      return `Selected model "${selectedModel}" is not configured or unavailable. Please select another model and retry.`;
+    }
+
     if (selectedModel === "sambanova") {
       try {
         const sambaReply = await sendSambaNovaCompletion(messages, maxTokens, 0.7);
-        if (sambaReply) return sambaReply;
+        return sambaReply || "No reply from AI";
       } catch (err) {
-        console.warn("SambaNova chat failed, falling back to Groq:", err?.message || err);
+        console.warn("SambaNova chat failed:", err?.message || err);
+        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
       }
     }
 
-    const groqReply = await sendGroqCompletion(messages, maxTokens, 0.7);
-    return groqReply || "No reply from AI";
+    if (selectedModel === "groq") {
+      try {
+        const groqReply = await sendGroqCompletion(messages, maxTokens, 0.7);
+        return groqReply || "No reply from AI";
+      } catch (err) {
+        console.warn("Groq chat failed:", err?.message || err);
+        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
+      }
+    }
+
+    return `Selected model "${selectedModel}" is unsupported. Please choose a valid model.`;
   } catch (err) {
     console.error("Chat completion error:", err.message || err);
     return "AI is currently unavailable, your backend and DB are working :)";
