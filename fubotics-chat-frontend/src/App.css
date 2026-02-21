@@ -405,6 +405,7 @@ a:hover {
   flex-direction: column;
   min-width: 0;
   background: transparent;
+  position: relative;
 }
 
 .hero-title {
@@ -479,6 +480,25 @@ a:hover {
   padding: 0.35rem 0.55rem;
   font-size: 0.78rem;
   cursor: pointer;
+}
+
+.model-select-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.model-select {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.model-select:focus {
+  outline: 1px solid rgba(148, 163, 184, 0.45);
 }
 
 .deep-search-btn.active {
@@ -1241,7 +1261,8 @@ a:hover {
   }
 
   .deep-search-btn,
-  .files-toggle-btn {
+  .files-toggle-btn,
+  .model-select {
     font-size: 0.72rem;
     padding: 0.3rem 0.45rem;
   }

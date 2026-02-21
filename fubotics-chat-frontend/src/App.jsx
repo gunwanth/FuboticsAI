@@ -3,6 +3,17 @@ import axios from "axios";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const ANONYMOUS_DEFAULT_MODEL = "sambanova";
+const LANDING_TITLES = [
+  "What can I help with?",
+  "How can I support you today?",
+  "What would you like to explore?",
+  "What are we building today?",
+  "What do you want to solve next?",
+  "How can I assist right now?",
+  "What should we work on first?",
+  "What can I help you figure out?",
+];
 axios.defaults.withCredentials = true;
 
 // Axios interceptor setup for token refresh
@@ -93,6 +104,10 @@ export default function App() {
   const [dataAnalytics, setDataAnalytics] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
+  const [availableModels, setAvailableModels] = useState([
+    { id: "groq", label: "Groq (Llama 3.3 70B)", enabled: true },
+  ]);
+  const [selectedModel, setSelectedModel] = useState(localStorage.getItem("chatModel") || "groq");
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
@@ -112,10 +127,22 @@ export default function App() {
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const copyResetTimerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const [landingTitle, setLandingTitle] = useState(LANDING_TITLES[0]);
   const getSessionLabel = (session) => {
     if (session?.name) return session.name;
     if (Number.isInteger(session?.session_number)) return `Session ${session.session_number}`;
     return `Chat ${session?.id}`;
+  };
+  const rotateLandingTitle = () => {
+    setLandingTitle((prev) => {
+      if (LANDING_TITLES.length <= 1) return prev;
+      const currentIndex = LANDING_TITLES.indexOf(prev);
+      let nextIndex = currentIndex;
+      while (nextIndex === currentIndex) {
+        nextIndex = Math.floor(Math.random() * LANDING_TITLES.length);
+      }
+      return LANDING_TITLES[nextIndex];
+    });
   };
 
   useEffect(() => {
@@ -196,6 +223,32 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const loadModels = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/api/models`);
+        const models = Array.isArray(res.data?.models) ? res.data.models : [];
+        const enabledModels = models.filter((m) => m?.enabled);
+        if (enabledModels.length > 0) {
+          setAvailableModels(enabledModels);
+          const currentStillValid = enabledModels.some((m) => m.id === selectedModel);
+          if (!currentStillValid) {
+            const fallback = res.data?.defaultModel || enabledModels[0].id;
+            setSelectedModel(fallback);
+            localStorage.setItem("chatModel", fallback);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load model list, using default:", err?.message || err);
+      }
+    };
+    loadModels();
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("chatModel", selectedModel);
+  }, [selectedModel]);
+
+  useEffect(() => {
     if (chatWindowRef.current) {
       chatWindowRef.current.scrollTop = chatWindowRef.current.scrollHeight;
     }
@@ -232,6 +285,7 @@ export default function App() {
       setMessages([]);
       setSessionAttachments([]);
     }
+    rotateLandingTitle();
   }, [token]);
 
   function AuthScreen() {
@@ -357,6 +411,7 @@ export default function App() {
   }
 
   async function handleNewChat() {
+    rotateLandingTitle();
     setSelectedSessionId(null);
     setMessages([]);
     setAttachedFiles([]);
@@ -619,6 +674,7 @@ export default function App() {
     const text = input.trim() || "(Sent files)";
     const isAnonymousSharedMode = !!shareToken && !token;
     const isAnonymousPublicMode = !token && !shareToken;
+    const activeModel = token ? selectedModel : ANONYMOUS_DEFAULT_MODEL;
     if (
       (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) ||
       (isAnonymousPublicMode && anonymousQuestionCount >= 15)
@@ -633,6 +689,7 @@ export default function App() {
         const res = await axios.put(`${API_BASE}/api/messages/${editingMessageId}`, {
           content: text,
           deepSearch: deepSearchEnabled,
+          model: activeModel,
         });
         setMessages(res.data.messages || []);
         setInput("");
@@ -678,6 +735,7 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/chat`, {
           content: text,
           history: historyForApi,
+          model: ANONYMOUS_DEFAULT_MODEL,
         });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setSharedMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
@@ -700,6 +758,7 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/chat`, {
           content: text,
           history: historyForApi,
+          model: ANONYMOUS_DEFAULT_MODEL,
         });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setAnonymousMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
@@ -717,6 +776,7 @@ export default function App() {
         sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
+        model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
       });
       setMessages(res.data.messages || []);
@@ -1102,6 +1162,8 @@ export default function App() {
 
   const isLandingMode =
     !shareToken &&
+    !loading &&
+    !isTyping &&
     (
       (!token && anonymousMessages.length === 0) ||
       (token && (!selectedSessionId || (selectedSessionId && messages.length === 0)))
@@ -1296,6 +1358,22 @@ export default function App() {
                 <h1>NexaCore AI</h1>
               </div>
               <div className="header-actions">
+                {token && (
+                  <div className="model-select-wrap">
+                    <select
+                      className="model-select"
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      title="Select chat model"
+                    >
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <button
                   className={`deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
                   onClick={() => setDeepSearchEnabled((prev) => !prev)}
@@ -1321,7 +1399,7 @@ export default function App() {
 
             <div className="chat-window" ref={chatWindowRef}>
               {isLandingMode && (
-                <div className="hero-title">What can I help with?</div>
+                <div className="hero-title">{landingTitle}</div>
               )}
               {shareToken && sharedView.loading && (
                 <div className="empty-state"><div className="empty-state-content"><p>Loading shared chat...</p></div></div>

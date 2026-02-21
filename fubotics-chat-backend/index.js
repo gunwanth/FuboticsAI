@@ -245,6 +245,7 @@ if (!groqKey) {
 const groq = new Groq({ apiKey: groqKey });
 const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
 const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
+const sambaNovaChatModel = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
 const sambaNovaPromptModel = process.env.SAMBANOVA_IMAGE_PROMPT_MODEL || "Meta-Llama-3.3-70B-Instruct";
 const freepikEnabled = String(process.env.ENABLE_FREEPIK || "false").toLowerCase() === "true";
 const freepikApiKey = freepikEnabled ? process.env.FREEPIK_API_KEY || null : null;
@@ -265,6 +266,23 @@ const extractionMaxChars = Math.min(
   120000,
   Math.max(4000, Number.parseInt(process.env.EXTRACTION_MAX_CHARS || "30000", 10))
 );
+
+const CHAT_MODELS = {
+  groq: {
+    id: "groq",
+    label: "Groq (Llama 3.3 70B)",
+    enabled: Boolean(groqKey),
+    model: "llama-3.3-70b-versatile",
+  },
+  sambanova: {
+    id: "sambanova",
+    label: "SambaNova",
+    enabled: Boolean(sambaNovaApiKey),
+    model: sambaNovaChatModel,
+  },
+};
+
+const defaultChatModel = CHAT_MODELS.groq.enabled ? "groq" : (CHAT_MODELS.sambanova.enabled ? "sambanova" : "groq");
 
 function createFallbackPng(prompt = "") {
   const width = 768;
@@ -979,10 +997,46 @@ function detectGenerationRequest(content) {
   return null;
 }
 
-async function getAIReply(history, sessionAttachments = [], webSources = [], extraContext = "") {
+function resolvePreferredChatModel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized && CHAT_MODELS[normalized]?.enabled) return normalized;
+  return defaultChatModel;
+}
+
+async function sendGroqCompletion(messages, maxTokens, temperature) {
+  const response = await groq.chat.completions.create({
+    model: CHAT_MODELS.groq.model,
+    messages,
+    max_tokens: maxTokens,
+    temperature,
+  });
+  return response.choices?.[0]?.message?.content || "";
+}
+
+async function sendSambaNovaCompletion(messages, maxTokens, temperature) {
+  const response = await axios.post(
+    `${sambaNovaBaseUrl}/chat/completions`,
+    {
+      model: CHAT_MODELS.sambanova.model,
+      messages,
+      max_tokens: maxTokens,
+      temperature,
+    },
+    {
+      timeout: 45000,
+      headers: {
+        Authorization: `Bearer ${sambaNovaApiKey}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+  return response.data?.choices?.[0]?.message?.content || "";
+}
+
+async function getAIReply(history, sessionAttachments = [], webSources = [], extraContext = "", preferredModel = null) {
   try {
     let systemContent = "You are a helpful assistant.";
-    
+
     if (sessionAttachments.length > 0) {
       systemContent += "\n\nYou have access to the following files uploaded in this conversation:\n";
       for (const att of sessionAttachments) {
@@ -1015,23 +1069,27 @@ async function getAIReply(history, sessionAttachments = [], webSources = [], ext
 
     const messages = [
       { role: "system", content: systemContent },
-      ...history.map((m) => ({ role: m.role, content: m.content }))
+      ...history.map((m) => ({ role: m.role, content: m.content })),
     ];
 
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages,
-      max_tokens: webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
-      temperature: 0.7,
-    });
+    const maxTokens = webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
+    const selectedModel = resolvePreferredChatModel(preferredModel);
+    if (selectedModel === "sambanova") {
+      try {
+        const sambaReply = await sendSambaNovaCompletion(messages, maxTokens, 0.7);
+        if (sambaReply) return sambaReply;
+      } catch (err) {
+        console.warn("SambaNova chat failed, falling back to Groq:", err?.message || err);
+      }
+    }
 
-    return response.choices?.[0]?.message?.content || "No reply from AI";
+    const groqReply = await sendGroqCompletion(messages, maxTokens, 0.7);
+    return groqReply || "No reply from AI";
   } catch (err) {
-    console.error("❌ Groq error:", err.message || err);
-    return "AI is currently unavailable, your backend and DB are working 🙂";
+    console.error("Chat completion error:", err.message || err);
+    return "AI is currently unavailable, your backend and DB are working :)";
   }
 }
-
 function resolveAttachmentDiskPath(attachment) {
   if (!attachment) return null;
   const candidates = [];
@@ -1064,6 +1122,15 @@ function resolveAttachmentDiskPath(attachment) {
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, allowed_origins: ALLOWED_ORIGINS });
+});
+
+app.get("/api/models", (req, res) => {
+  const models = Object.values(CHAT_MODELS).map((item) => ({
+    id: item.id,
+    label: item.label,
+    enabled: item.enabled,
+  }));
+  res.json({ models, defaultModel: defaultChatModel });
 });
 
 // Auth routes
@@ -1156,7 +1223,7 @@ app.get("/api/messages", authMiddleware, async (req, res) => {
 
 app.post("/api/messages", authMiddleware, async (req, res) => {
   try {
-    const { sessionId, content, attachmentIds, deepSearch } = req.body;
+    const { sessionId, content, attachmentIds, deepSearch, model } = req.body;
     const parsedSessionId = Number.parseInt(sessionId, 10);
     if (!Number.isInteger(parsedSessionId)) {
       return res.status(400).json({ error: "Valid sessionId required" });
@@ -1214,7 +1281,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(content)
         ? await getCrossChatContext(req.user.id, parsedSessionId)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model);
       if (sources.length > 0) {
         const links = sources
           .map((s) => `- [${s.title}](${s.url})`)
@@ -1389,6 +1456,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
   try {
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
+    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!token) return res.status(400).json({ error: "Share token required" });
     if (!content) return res.status(400).json({ error: "Message content is required" });
@@ -1402,7 +1470,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
       .slice(-30);
     sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
 
-    const assistant = await getAIReply(sanitizedHistory, [], [], "");
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model);
     res.json({ assistant });
   } catch (err) {
     console.error("POST /api/public/share/:token/chat error:", err);
@@ -1413,6 +1481,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
 app.post("/api/public/chat", async (req, res) => {
   try {
     const content = String(req.body?.content || "").trim();
+    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!content) return res.status(400).json({ error: "Message content is required" });
 
@@ -1422,7 +1491,7 @@ app.post("/api/public/chat", async (req, res) => {
       .slice(-30);
     sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
 
-    const assistant = await getAIReply(sanitizedHistory, [], [], "");
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model);
     res.json({ assistant });
   } catch (err) {
     console.error("POST /api/public/chat error:", err);
@@ -1433,7 +1502,7 @@ app.post("/api/public/chat", async (req, res) => {
 app.put("/api/messages/:id", authMiddleware, async (req, res) => {
   try {
     const messageId = Number.parseInt(req.params.id, 10);
-    const { content, deepSearch, rewriteThread } = req.body || {};
+    const { content, deepSearch, rewriteThread, model } = req.body || {};
     if (!Number.isInteger(messageId) || !content || !String(content).trim()) {
       return res.status(400).json({ error: "Valid message id and content are required" });
     }
@@ -1494,7 +1563,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
         ? await getCrossChatContext(req.user.id, targetMessage.session_id)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model);
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;
