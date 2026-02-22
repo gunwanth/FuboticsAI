@@ -1214,11 +1214,14 @@ app.get("/api/models", (req, res) => {
 // Auth routes
 app.post("/api/signup", authController.signup);
 app.post("/api/login", authController.login);
+app.post("/api/forgot-password/username", authController.forgotPasswordByUsername);
+app.post("/api/forgot-password/email", authController.forgotPasswordByEmail);
 app.post("/api/refresh", authController.refresh);
 app.post("/api/logout", authController.logout);
 app.get("/api/me", authMiddleware, authController.me);
 app.get("/api/session-logs", authMiddleware, authController.getSessionLogs);
 app.post("/api/logout-all", authMiddleware, authController.logoutAll);
+app.delete("/api/account", authMiddleware, authController.deleteAccount);
 
 // Sessions routes
 app.get("/api/sessions", authMiddleware, async (req, res) => {

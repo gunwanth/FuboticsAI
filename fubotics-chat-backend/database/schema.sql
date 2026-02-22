@@ -6,6 +6,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username VARCHAR(255) UNIQUE NOT NULL,
+  email VARCHAR(255),
   password_hash VARCHAR(255) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -149,6 +150,13 @@ ALTER COLUMN session_number SET NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_user_session_number
 ON chat_sessions(user_id, session_number);
+
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique
+ON users(email)
+WHERE email IS NOT NULL;
 
 DO $$
 BEGIN

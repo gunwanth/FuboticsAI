@@ -163,6 +163,26 @@ a:hover {
   color: #000;
 }
 
+.forgot-inline-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -0.15rem;
+}
+
+.forgot-inline-btn {
+  border: none;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.76rem;
+  padding: 0.15rem 0.2rem;
+  cursor: pointer;
+}
+
+.forgot-inline-btn:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
 .auth-modal-overlay {
   position: fixed;
   inset: 0;
@@ -239,6 +259,154 @@ a:hover {
 .new-chat-btn:hover,
 .logout-btn:hover {
   background: rgba(255, 255, 255, 0.14);
+}
+
+.search-chats-btn {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--sidebar-text);
+  padding: 0.62rem 0.7rem;
+  margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.search-chats-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.search-chats-input {
+  width: 100%;
+  margin-top: 0.5rem;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.07);
+  color: #e5e7eb;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.search-chats-input::placeholder {
+  color: #9ca3af;
+}
+
+.profile-entry-btn {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  padding: 0.55rem;
+  display: flex;
+  align-items: center;
+  gap: 0.58rem;
+  color: #f3f4f6;
+  cursor: pointer;
+  text-align: left;
+}
+
+.profile-entry-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.profile-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: linear-gradient(140deg, #7c3aed 0%, #9333ea 100%);
+  display: grid;
+  place-items: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.profile-entry-text {
+  min-width: 0;
+}
+
+.profile-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #f3f4f6;
+  margin-bottom: 0.15rem;
+}
+
+.profile-status {
+  font-size: 0.78rem;
+  color: #9ca3af;
+}
+
+.profile-panel {
+  margin-top: 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(7, 11, 20, 0.85);
+  border-radius: 10px;
+  padding: 0.55rem;
+}
+
+.profile-panel-title {
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  margin-bottom: 0.45rem;
+}
+
+.profile-activity-list {
+  max-height: 170px;
+  overflow: auto;
+  display: grid;
+  gap: 0.38rem;
+  padding-right: 0.25rem;
+}
+
+.profile-activity-row {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  padding: 0.38rem 0.45rem;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.profile-activity-action {
+  font-size: 0.8rem;
+  color: #f3f4f6;
+}
+
+.profile-activity-time {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  margin-top: 0.1rem;
+}
+
+.profile-empty {
+  font-size: 0.78rem;
+  color: #9ca3af;
+  padding: 0.25rem 0.15rem;
+}
+
+.profile-panel-actions {
+  margin-top: 0.55rem;
+}
+
+.delete-account-btn {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.32);
+  color: #fecaca;
+  padding: 0.62rem 0.7rem;
+  margin-top: 0.45rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.delete-account-btn:hover {
+  background: rgba(127, 29, 29, 0.46);
 }
 
 .btn-icon {

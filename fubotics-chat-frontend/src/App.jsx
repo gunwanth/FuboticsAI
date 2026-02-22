@@ -92,6 +92,9 @@ axios.interceptors.response.use(
 export default function App() {
   const initialShareToken = new URLSearchParams(window.location.search).get("share");
   const [sessions, setSessions] = useState([]);
+  const [showSessionSearch, setShowSessionSearch] = useState(false);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
   const [token, setToken] = useState(localStorage.getItem("accessToken") || null);
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -114,6 +117,10 @@ export default function App() {
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
+  const [pendingDeleteAccount, setPendingDeleteAccount] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [recentActivity, setRecentActivity] = useState([]);
   const [shareToken, setShareToken] = useState(initialShareToken);
   const [sharedView, setSharedView] = useState({ loading: false, error: "", session: null, messages: [] });
   const [showAuthScreen, setShowAuthScreen] = useState(false);
@@ -133,6 +140,9 @@ export default function App() {
     if (Number.isInteger(session?.session_number)) return `Session ${session.session_number}`;
     return `Chat ${session?.id}`;
   };
+  const filteredSessions = sessions.filter((session) =>
+    getSessionLabel(session).toLowerCase().includes(sessionSearchQuery.trim().toLowerCase())
+  );
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -277,9 +287,13 @@ export default function App() {
       localStorage.setItem("accessToken", token);
       axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
       fetchSessions();
+      fetchCurrentUser();
     } else {
       localStorage.removeItem("accessToken");
       delete axios.defaults.headers.common["Authorization"];
+      setProfileOpen(false);
+      setRecentActivity([]);
+      setCurrentUser(null);
       setSessions([]);
       setSelectedSessionId(null);
       setMessages([]);
@@ -290,8 +304,15 @@ export default function App() {
 
   function AuthScreen() {
     const [localUser, setLocalUser] = useState("");
+    const [localEmail, setLocalEmail] = useState("");
     const [localPass, setLocalPass] = useState("");
     const [localMode, setLocalMode] = useState(authIntentMode || "login");
+    const [loginFailureMap, setLoginFailureMap] = useState({});
+
+    const loginIdentifierKey = String(localUser || "").trim().toLowerCase();
+    const loginFailCount = loginFailureMap[loginIdentifierKey] || 0;
+    const showForgotPasswordButton =
+      localMode === "login" && Boolean(loginIdentifierKey) && loginFailCount >= 3;
 
     useEffect(() => {
       setLocalMode(authIntentMode || "login");
@@ -300,21 +321,77 @@ export default function App() {
     async function handleLocalSubmit(e) {
       e.preventDefault();
       try {
-        const path = localMode === "signup" ? "/api/signup" : "/api/login";
-        const res = await axios.post(
-          `${API_BASE}${path}`,
-          { username: localUser, password: localPass },
-          { withCredentials: true }
-        );
-        const t = res.data.accessToken;
-        if (t) {
-          setToken(t);
-          setShowAuthScreen(false);
-          setSharedLimitModal(null);
-          setLocalUser("");
+        if (localMode === "signup") {
+          const res = await axios.post(
+            `${API_BASE}/api/signup`,
+            { username: localUser, email: localEmail || undefined, password: localPass },
+            { withCredentials: true }
+          );
+          const t = res.data.accessToken;
+          if (t) {
+            setToken(t);
+            setShowAuthScreen(false);
+            setSharedLimitModal(null);
+            setLocalUser("");
+            setLocalEmail("");
+            setLocalPass("");
+          }
+          return;
+        }
+
+        if (localMode === "login") {
+          const res = await axios.post(
+            `${API_BASE}/api/login`,
+            { username: localUser, password: localPass },
+            { withCredentials: true }
+          );
+          const t = res.data.accessToken;
+          if (t) {
+            if (loginIdentifierKey) {
+              setLoginFailureMap((prev) => ({ ...prev, [loginIdentifierKey]: 0 }));
+            }
+            setToken(t);
+            setShowAuthScreen(false);
+            setSharedLimitModal(null);
+            setLocalUser("");
+            setLocalPass("");
+          }
+          return;
+        }
+
+        if (localMode === "forgot_username") {
+          await axios.post(`${API_BASE}/api/forgot-password/username`, {
+            username: localUser,
+            newPassword: localPass,
+          });
+          alert("Password updated. Please login with your new password.");
+          setLocalMode("login");
           setLocalPass("");
+          return;
+        }
+
+        if (localMode === "forgot_email") {
+          await axios.post(`${API_BASE}/api/forgot-password/email`, {
+            email: localEmail,
+            newPassword: localPass,
+          });
+          alert("Password updated. Please login with your new password.");
+          setLocalMode("login");
+          setLocalPass("");
+          return;
         }
       } catch (err) {
+        if (localMode === "login" && loginIdentifierKey) {
+          const isInvalidCredentials =
+            err?.response?.status === 401 ||
+            String(err?.response?.data?.error || "").toLowerCase().includes("invalid credentials");
+          if (isInvalidCredentials) {
+            setLoginFailureMap((prev) => ({
+              ...prev,
+              [loginIdentifierKey]: (prev[loginIdentifierKey] || 0) + 1,
+            }));
+          }
+        }
         console.error("Auth error", err.response?.data || err.message || err);
         alert(err.response?.data?.error || "Auth failed");
       }
@@ -327,35 +404,113 @@ export default function App() {
             <div className="logo-icon" aria-hidden="true"></div>
             <h2>NexaCore AI</h2>
           </div>
-          <h3>{localMode === "login" ? "Welcome Back" : "Create Account"}</h3>
+          <h3>
+            {localMode === "login" && "Welcome Back"}
+            {localMode === "signup" && "Create Account"}
+            {localMode === "forgot_username" && "Reset Password"}
+            {localMode === "forgot_email" && "Reset Password With Email"}
+          </h3>
           <form onSubmit={handleLocalSubmit} className="auth-form">
             <div className="input-group">
               <input 
-                placeholder="Username" 
+                placeholder={localMode === "login" ? "Username or Email" : "Username"} 
                 value={localUser} 
                 onChange={(e) => setLocalUser(e.target.value)}
-                required 
+                required={localMode !== "forgot_email"}
               />
             </div>
+            {(localMode === "signup" || localMode === "forgot_email") && (
+              <div className="input-group">
+                <input
+                  placeholder="Email"
+                  type="email"
+                  value={localEmail}
+                  onChange={(e) => setLocalEmail(e.target.value)}
+                  required={localMode === "forgot_email"}
+                />
+              </div>
+            )}
             <div className="input-group">
               <input 
-                placeholder="Password" 
+                placeholder={localMode.startsWith("forgot") ? "New Password" : "Password"} 
                 type="password" 
                 value={localPass} 
                 onChange={(e) => setLocalPass(e.target.value)}
                 required 
               />
             </div>
+            {localMode === "login" && showForgotPasswordButton && (
+              <div className="forgot-inline-wrap">
+                <button
+                  type="button"
+                  className="forgot-inline-btn"
+                  onClick={() => setLocalMode("forgot_username")}
+                >
+                  Forgot password?
+                </button>
+              </div>
+            )}
             <button type="submit" className="primary-btn">
-              {localMode === "login" ? "Login" : "Create Account"}
+              {localMode === "login" && "Login"}
+              {localMode === "signup" && "Create Account"}
+              {localMode.startsWith("forgot") && "Update Password"}
             </button>
-            <button 
-              type="button" 
-              className="secondary-btn"
-              onClick={() => setLocalMode(localMode === "login" ? "signup" : "login")}
-            >
-              {localMode === "login" ? "Need an account?" : "Already have an account?"}
-            </button>
+            {localMode === "login" && (
+              <>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setLocalMode("signup")}
+                >
+                  Need an account?
+                </button>
+              </>
+            )}
+            {localMode === "signup" && (
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setLocalMode("login")}
+              >
+                Already have an account?
+              </button>
+            )}
+            {localMode === "forgot_username" && (
+              <>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setLocalMode("forgot_email")}
+                >
+                  Forgot username? Use email
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setLocalMode("login")}
+                >
+                  Back to login
+                </button>
+              </>
+            )}
+            {localMode === "forgot_email" && (
+              <>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setLocalMode("forgot_username")}
+                >
+                  Use username instead
+                </button>
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setLocalMode("login")}
+                >
+                  Back to login
+                </button>
+              </>
+            )}
           </form>
         </div>
       </div>
@@ -388,7 +543,78 @@ export default function App() {
     } catch (err) {
       console.error("Logout request failed", err);
     }
+    setProfileOpen(false);
     setToken(null);
+  }
+
+  async function fetchCurrentUser() {
+    try {
+      const res = await axios.get(`${API_BASE}/api/me`);
+      setCurrentUser(res.data?.user || null);
+    } catch (err) {
+      console.error("Error loading user profile", err);
+      setCurrentUser(null);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    try {
+      await axios.delete(`${API_BASE}/api/account`, { withCredentials: true });
+      setProfileOpen(false);
+      setPendingDeleteAccount(false);
+      setToken(null);
+      localStorage.removeItem("accessToken");
+      delete axios.defaults.headers.common["Authorization"];
+      setCurrentUser(null);
+      setSessions([]);
+      setMessages([]);
+      setSelectedSessionId(null);
+      setSessionAttachments([]);
+      setAttachedFiles([]);
+      setPendingAttachmentIds([]);
+    } catch (err) {
+      console.error("Delete account error", err);
+      alert(err.response?.data?.error || "Failed to delete account");
+    }
+  }
+
+  async function fetchRecentActivity() {
+    if (!token) return;
+    setActivityLoading(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/session-logs`);
+      const logs = Array.isArray(res.data?.logs) ? res.data.logs : [];
+      const cutoff = Date.now() - (3 * 24 * 60 * 60 * 1000);
+      const filtered = logs
+        .filter((l) => {
+          const ts = new Date(l.created_at).getTime();
+          return Number.isFinite(ts) && ts >= cutoff;
+        })
+        .slice(0, 25);
+      setRecentActivity(filtered);
+    } catch (err) {
+      console.error("Failed to fetch recent activity", err);
+      setRecentActivity([]);
+    } finally {
+      setActivityLoading(false);
+    }
+  }
+
+  async function toggleProfilePanel() {
+    const next = !profileOpen;
+    setProfileOpen(next);
+    if (next) {
+      await fetchRecentActivity();
+    }
+  }
+
+  function formatActivityRow(row) {
+    const action = String(row?.action || "").toLowerCase();
+    if (action === "login") return "Logged in";
+    if (action === "logout") return "Logged out";
+    if (action === "token_refresh") return "Session refreshed";
+    if (action === "logout_all") return "Logged out from all devices";
+    return row?.action || "Activity";
   }
 
   async function fetchMessages(sessionId) {
@@ -1183,6 +1409,29 @@ export default function App() {
               <span className="btn-icon">+</span>
               <span className="btn-text">New Chat</span>
             </button>
+            {token && (
+              <>
+                <button
+                  className="search-chats-btn"
+                  onClick={() => {
+                    const next = !showSessionSearch;
+                    setShowSessionSearch(next);
+                    if (!next) setSessionSearchQuery("");
+                  }}
+                >
+                  <span className="btn-text">Search chats</span>
+                </button>
+                {showSessionSearch && (
+                  <input
+                    className="search-chats-input"
+                    type="text"
+                    placeholder="Search chats..."
+                    value={sessionSearchQuery}
+                    onChange={(e) => setSessionSearchQuery(e.target.value)}
+                  />
+                )}
+              </>
+            )}
           </div>
 
           <div className="session-list">
@@ -1202,7 +1451,7 @@ export default function App() {
               </div>
             )}
 
-            {token && sessions.map((session) => (
+            {token && filteredSessions.map((session) => (
               <div
                 key={session.id}
                 className={`session-item ${session.id === selectedSessionId ? 'active' : ''}`}
@@ -1252,13 +1501,64 @@ export default function App() {
                 </div>
               </div>
             ))}
+
+            {token && sessions.length > 0 && filteredSessions.length === 0 && (
+              <div className="empty-sessions">
+                <div className="empty-icon">Search</div>
+                <p>No chats found</p>
+                <small>Try a different keyword</small>
+              </div>
+            )}
           </div>
 
           <div className="sidebar-footer">
             {token ? (
-              <button className="logout-btn" onClick={handleLogout}>
-                <span>&#8634;</span> Logout
-              </button>
+              <>
+                <button className="profile-entry-btn" onClick={toggleProfilePanel}>
+                  <div className="profile-avatar">
+                    {(currentUser?.username || "U").slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="profile-entry-text">
+                    <div className="profile-name">{currentUser?.username || "User"}</div>
+                    <div className="profile-status">Active now</div>
+                  </div>
+                </button>
+                {profileOpen && (
+                  <div className="profile-panel">
+                    <div className="profile-panel-title">Activity (last 3 days)</div>
+                    <div className="profile-activity-list">
+                      {activityLoading ? (
+                        <div className="profile-empty">Loading activity...</div>
+                      ) : recentActivity.length === 0 ? (
+                        <div className="profile-empty">No recent activity</div>
+                      ) : (
+                        recentActivity.map((item) => (
+                          <div key={item.id} className="profile-activity-row">
+                            <div className="profile-activity-action">{formatActivityRow(item)}</div>
+                            <div className="profile-activity-time">
+                              {item.created_at ? new Date(item.created_at).toLocaleString() : ""}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <div className="profile-panel-actions">
+                      <button className="logout-btn" onClick={handleLogout}>
+                        <span>&#8634;</span> Logout
+                      </button>
+                      <button
+                        className="delete-account-btn"
+                        onClick={() => {
+                          setProfileOpen(false);
+                          setPendingDeleteAccount(true);
+                        }}
+                      >
+                        Delete Account
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             ) : (
               <button className="logout-btn" onClick={() => openAuthFor("login")}>
                 <span>&#8634;</span> Login
@@ -1295,6 +1595,25 @@ export default function App() {
                 >
                   Cancel
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pendingDeleteAccount && (
+          <div
+            className="delete-chat-modal-overlay"
+            onClick={() => setPendingDeleteAccount(false)}
+          >
+            <div
+              className="delete-chat-modal"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3>Delete Account</h3>
+              <p>Deleting your account will result in premanent deletion of yout details from the database. Are you sure you want to deleted your account</p>
+              <div className="delete-chat-modal-actions">
+                <button className="confirm-btn" onClick={handleDeleteAccount}>Yes</button>
+                <button className="cancel-btn" onClick={() => setPendingDeleteAccount(false)}>Cancel</button>
               </div>
             </div>
           </div>
