@@ -458,6 +458,41 @@ Return only final content (no meta commentary).`;
 async function suggestSessionNameFromPrompt(prompt) {
   const raw = String(prompt || "").trim();
   if (!raw) return "New Chat";
+
+  const fallbackName = (() => {
+    const cleaned = raw
+      .replace(/[`*_#>[\](){}]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return "New Chat";
+
+    const topicalMatch = cleaned.match(/\b(?:about|for|on|regarding)\b\s+(.+)/i);
+    if (topicalMatch?.[1]) {
+      return topicalMatch[1]
+        .split(/\s+/)
+        .slice(0, 6)
+        .join(" ")
+        .replace(/[^\w\s-]/g, "")
+        .trim()
+        .slice(0, 60) || "New Chat";
+    }
+
+    const stopWords = new Set([
+      "the", "a", "an", "please", "can", "could", "would", "should", "help", "me", "i",
+      "to", "of", "and", "or", "in", "on", "for", "with", "is", "are", "this", "that",
+      "my", "your", "our", "it", "be", "as", "at", "by", "from", "do", "does", "did",
+    ]);
+    const tokens = cleaned
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, " ")
+      .split(/\s+/)
+      .filter((t) => t && !stopWords.has(t));
+
+    const picked = tokens.slice(0, 6).map((t) => t.charAt(0).toUpperCase() + t.slice(1));
+    if (picked.length) return picked.join(" ").slice(0, 60);
+    return cleaned.split(/\s+/).slice(0, 5).join(" ").slice(0, 60) || "New Chat";
+  })();
+
   try {
     const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
@@ -477,7 +512,34 @@ async function suggestSessionNameFromPrompt(prompt) {
   } catch (err) {
     console.warn("Session name suggestion failed:", err.message);
   }
-  return raw.split(/\s+/).slice(0, 6).join(" ").slice(0, 60) || "New Chat";
+  return fallbackName;
+}
+
+async function ensureSequentialSessionName(userId, proposedName) {
+  const baseName = String(proposedName || "").trim().slice(0, 255) || "New Chat";
+  const sessions = await chatSessionModel.getByUserId(userId);
+  const names = sessions
+    .map((s) => String(s.name || "").trim())
+    .filter(Boolean);
+
+  const lowerBase = baseName.toLowerCase();
+  let maxSuffix = 0;
+  for (const name of names) {
+    const lowerName = name.toLowerCase();
+    if (lowerName === lowerBase) {
+      maxSuffix = Math.max(maxSuffix, 1);
+      continue;
+    }
+    const escaped = lowerBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = lowerName.match(new RegExp(`^${escaped}\\s+(\\d+)$`));
+    if (match) {
+      const suffix = Number.parseInt(match[1], 10);
+      if (Number.isInteger(suffix)) maxSuffix = Math.max(maxSuffix, suffix);
+    }
+  }
+
+  if (maxSuffix === 0) return baseName;
+  return `${baseName} ${maxSuffix + 1}`.slice(0, 255);
 }
 
 function renderAttachmentInsight(analysis) {
@@ -1323,7 +1385,8 @@ app.post("/api/sessions/auto", authMiddleware, async (req, res) => {
     const userId = req.user.id;
     const firstPrompt = String(req.body?.firstPrompt || "").trim();
     const suggestedName = await suggestSessionNameFromPrompt(firstPrompt);
-    const session = await chatSessionModel.create(userId, suggestedName || null);
+    const sequencedName = await ensureSequentialSessionName(userId, suggestedName || "New Chat");
+    const session = await chatSessionModel.create(userId, sequencedName || null);
     res.status(201).json({ session });
   } catch (err) {
     console.error("POST /api/sessions/auto error:", err);
@@ -1442,7 +1505,8 @@ app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) =
 
       const firstUser = normalizedHistory.find((m) => m.role === "user");
       const suggested = await suggestSessionNameFromPrompt(firstUser?.content || "Shared Chat");
-      const newSession = await chatSessionModel.create(req.user.id, suggested || "Shared Chat");
+      const sequencedName = await ensureSequentialSessionName(req.user.id, suggested || "Shared Chat");
+      const newSession = await chatSessionModel.create(req.user.id, sequencedName || "Shared Chat");
       for (const m of normalizedHistory) {
         await messageModel.create(newSession.id, m.role, m.content);
       }
