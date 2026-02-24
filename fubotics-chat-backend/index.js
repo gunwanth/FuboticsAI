@@ -1095,7 +1095,14 @@ async function sendSambaNovaCompletion(messages, maxTokens, temperature) {
   return response.data?.choices?.[0]?.message?.content || "";
 }
 
-async function getAIReply(history, sessionAttachments = [], webSources = [], extraContext = "", preferredModel = null) {
+async function getAIReply(
+  history,
+  sessionAttachments = [],
+  webSources = [],
+  extraContext = "",
+  preferredModel = null,
+  thinking = false
+) {
   try {
     let systemContent = "You are a helpful assistant.";
 
@@ -1127,6 +1134,10 @@ async function getAIReply(history, sessionAttachments = [], webSources = [], ext
     if (extraContext && extraContext.trim()) {
       systemContent += `\n\nAdditional context from other chats:\n${extraContext.trim()}`;
       systemContent += "\n\nUse it only if relevant to the current user request.";
+    }
+    if (thinking) {
+      systemContent +=
+        "\n\nThinking mode is ON. Think deeply, reason step-by-step internally, and provide a clear, well-structured answer.";
     }
 
     const messages = [
@@ -1304,7 +1315,7 @@ app.get("/api/messages", authMiddleware, async (req, res) => {
 
 app.post("/api/messages", authMiddleware, async (req, res) => {
   try {
-    const { sessionId, content, attachmentIds, deepSearch, model } = req.body;
+    const { sessionId, content, attachmentIds, deepSearch, thinking, model } = req.body;
     const parsedSessionId = Number.parseInt(sessionId, 10);
     if (!Number.isInteger(parsedSessionId)) {
       return res.status(400).json({ error: "Valid sessionId required" });
@@ -1362,7 +1373,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(content)
         ? await getCrossChatContext(req.user.id, parsedSessionId)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model, !!thinking);
       if (sources.length > 0) {
         const links = sources
           .map((s) => `- [${s.title}](${s.url})`)
@@ -1540,6 +1551,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const thinking = !!req.body?.thinking;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!token) return res.status(400).json({ error: "Share token required" });
     if (!content) return res.status(400).json({ error: "Message content is required" });
@@ -1553,7 +1565,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
       .slice(-30);
     sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
 
-    const assistant = await getAIReply(sanitizedHistory, [], [], "", model);
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model, thinking);
     res.json({ assistant });
   } catch (err) {
     console.error("POST /api/public/share/:token/chat error:", err);
@@ -1565,6 +1577,7 @@ app.post("/api/public/chat", async (req, res) => {
   try {
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const thinking = !!req.body?.thinking;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!content) return res.status(400).json({ error: "Message content is required" });
 
@@ -1574,7 +1587,7 @@ app.post("/api/public/chat", async (req, res) => {
       .slice(-30);
     sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
 
-    const assistant = await getAIReply(sanitizedHistory, [], [], "", model);
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model, thinking);
     res.json({ assistant });
   } catch (err) {
     console.error("POST /api/public/chat error:", err);
@@ -1585,9 +1598,12 @@ app.post("/api/public/chat", async (req, res) => {
 app.put("/api/messages/:id", authMiddleware, async (req, res) => {
   try {
     const messageId = Number.parseInt(req.params.id, 10);
-    const { content, deepSearch, rewriteThread, model } = req.body || {};
+    const { content, deepSearch, rewriteThread, thinking, model } = req.body || {};
     if (!Number.isInteger(messageId) || !content || !String(content).trim()) {
       return res.status(400).json({ error: "Valid message id and content are required" });
+    }
+    if (messageId <= 0) {
+      return res.status(400).json({ error: "Message id is out of valid range" });
     }
 
     const targetMessage = await messageModel.getById(messageId);
@@ -1646,7 +1662,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
         ? await getCrossChatContext(req.user.id, targetMessage.session_id)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model, !!thinking);
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;

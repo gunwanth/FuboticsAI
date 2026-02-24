@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import axios from "axios";
+import html2canvas from "html2canvas";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -137,7 +138,11 @@ export default function App() {
   const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const copyResetTimerRef = useRef(null);
+  const activeRequestControllerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const composerToolsRef = useRef(null);
+  const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const raw = localStorage.getItem("pinnedSessionIds");
@@ -166,6 +171,9 @@ export default function App() {
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
   const showIncognitoDraftHint = token && !shareToken && !selectedSessionId && incognitoDraftSelected;
   const showFloatingSessionMenu = token && !shareToken && !showIncognitoDraftHint;
+  const activeModelLabel = token
+    ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
+    : "SambaNova (Anonymous)";
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -302,9 +310,28 @@ export default function App() {
   }, [sidebarVisible]);
 
   useEffect(() => {
+    const handlePointerDown = (event) => {
+      if (!composerToolsRef.current) return;
+      if (!composerToolsRef.current.contains(event.target)) {
+        setComposerMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (copyResetTimerRef.current) {
         clearTimeout(copyResetTimerRef.current);
+      }
+      if (activeRequestControllerRef.current) {
+        activeRequestControllerRef.current.abort();
+        activeRequestControllerRef.current = null;
       }
     };
   }, []);
@@ -676,6 +703,7 @@ export default function App() {
     setOpenSessionMenuId(null);
     setOpenFloatingChatMenu(false);
     setOpenFloatingModelMenu(false);
+    setComposerMenuOpen(false);
     setIncognitoDraftSelected(false);
     setIncognitoMessages([]);
     setPendingDeleteSessionId(null);
@@ -932,8 +960,48 @@ export default function App() {
     setPendingAttachmentIds(prev => prev.filter((_, i) => i !== index));
   }
 
+  async function handleCaptureScreenshot() {
+    if (!chatWindowRef.current) {
+      alert("Chat area not available for screenshot.");
+      return;
+    }
+    try {
+      const canvas = await html2canvas(chatWindowRef.current, {
+        backgroundColor: null,
+        useCORS: true,
+        scale: window.devicePixelRatio > 1 ? 2 : 1,
+      });
+      const dataUrl = canvas.toDataURL("image/png");
+      const link = document.createElement("a");
+      link.href = dataUrl;
+      link.download = `chat_screenshot_${Date.now()}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setComposerMenuOpen(false);
+    } catch (err) {
+      console.error("Screenshot capture failed:", err);
+      alert("Failed to capture screenshot");
+    }
+  }
+
   async function handleSend() {
-    if ((!input.trim() && attachedFiles.length === 0) || loading) return;
+    if (loading) {
+      if (activeRequestControllerRef.current) {
+        activeRequestControllerRef.current.abort();
+        activeRequestControllerRef.current = null;
+      }
+      setLoading(false);
+      setIsTyping(false);
+      if (editingMessageId) {
+        setEditingMessageId(null);
+        if (selectedSessionId && token) {
+          fetchMessages(selectedSessionId);
+        }
+      }
+      return;
+    }
+    if (!input.trim() && attachedFiles.length === 0) return;
 
     const text = input.trim() || "(Sent files)";
     const isAnonymousSharedMode = !!shareToken && !token;
@@ -948,18 +1016,37 @@ export default function App() {
       return;
     }
     setLoading(true);
+    setComposerMenuOpen(false);
+    const requestController = new AbortController();
+    activeRequestControllerRef.current = requestController;
 
     if (editingMessageId) {
+      const editIdRaw = String(editingMessageId || "");
+      if (!editIdRaw || editIdRaw.startsWith("temp-")) {
+        setEditingMessageId(null);
+        setLoading(false);
+        setIsTyping(false);
+        return;
+      }
       try {
-        const res = await axios.put(`${API_BASE}/api/messages/${editingMessageId}`, {
+        const res = await axios.put(`${API_BASE}/api/messages/${editIdRaw}`, {
           content: text,
           deepSearch: deepSearchEnabled,
+          thinking: thinkingEnabled,
+          rewriteThread: true,
           model: activeModel,
-        });
+        }, { signal: requestController.signal });
         setMessages(res.data.messages || []);
         setInput("");
         setEditingMessageId(null);
       } catch (err) {
+        if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError") {
+          setEditingMessageId(null);
+          if (selectedSessionId && token) {
+            await fetchMessages(selectedSessionId);
+          }
+          return;
+        }
         console.error("Edit resend error", err);
         alert(err.response?.data?.error || "Failed to edit message");
       } finally {
@@ -971,14 +1058,17 @@ export default function App() {
     }
 
     setInput("");
+    let optimisticTempId = null;
 
     // Optimistic UI
     const tempMsg = {
-      id: Date.now(),
+      id: `temp-${Date.now()}`,
+      isTemporary: true,
       role: "user",
       content: text,
       attachments: attachedFiles.map(f => ({ filename: f.name }))
     };
+    optimisticTempId = tempMsg.id;
     if (!isAnonymousSharedMode && !isAnonymousPublicMode && !isLoggedInIncognitoMode) {
       setMessages((prev) => [...prev, tempMsg]);
     }
@@ -1000,8 +1090,9 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/chat`, {
           content: text,
           history: historyForApi,
+          thinking: thinkingEnabled,
           model: ANONYMOUS_DEFAULT_MODEL,
-        });
+        }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setSharedMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
 
@@ -1023,8 +1114,9 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/chat`, {
           content: text,
           history: historyForApi,
+          thinking: thinkingEnabled,
           model: ANONYMOUS_DEFAULT_MODEL,
-        });
+        }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setAnonymousMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
 
@@ -1046,8 +1138,9 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/chat`, {
           content: text,
           history: historyForApi,
+          thinking: thinkingEnabled,
           model: activeModel,
-        });
+        }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setIncognitoMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
         setInput("");
@@ -1059,11 +1152,19 @@ export default function App() {
         sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
+        thinking: thinkingEnabled,
         model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
-      });
+      }, { signal: requestController.signal });
       setMessages(res.data.messages || []);
     } catch (err) {
+      if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError") {
+        if (optimisticTempId) {
+          setMessages((prev) => prev.filter((m) => String(m.id) !== String(optimisticTempId)));
+        }
+        setInput(text);
+        return;
+      }
       console.error("Send error", err);
       if (isAnonymousSharedMode) {
         setSharedMessages((prev) => [
@@ -1091,6 +1192,9 @@ export default function App() {
         ]);
       }
     } finally {
+      if (activeRequestControllerRef.current === requestController) {
+        activeRequestControllerRef.current = null;
+      }
       setLoading(false);
       setIsTyping(false);
       setDeepSearchEnabled(false);
@@ -1099,6 +1203,12 @@ export default function App() {
 
   function startEditingMessage(msg) {
     if (!msg || msg.role !== "user") return;
+    if (msg.isTemporary || String(msg.id || "").startsWith("temp-")) {
+      setInput(msg.content || "");
+      setMessages((prev) => prev.filter((m) => String(m.id) !== String(msg.id)));
+      setEditingMessageId(null);
+      return;
+    }
     setEditingMessageId(msg.id);
     setInput(msg.content || "");
     setAttachedFiles([]);
@@ -1138,6 +1248,7 @@ export default function App() {
     setOpenSessionMenuId(null);
     setOpenFloatingChatMenu(false);
     setOpenFloatingModelMenu(false);
+    setComposerMenuOpen(false);
     if (window.innerWidth <= 768 && sidebarVisible) {
       setSidebarVisible(false);
     }
@@ -1196,6 +1307,7 @@ export default function App() {
     setOpenSessionMenuId(null);
     setOpenFloatingChatMenu(false);
     setOpenFloatingModelMenu(false);
+    setComposerMenuOpen(false);
     setPendingDeleteSessionId(null);
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.set("session", String(sessionId));
@@ -1812,14 +1924,6 @@ export default function App() {
                 New Chat
               </button>
               <button
-                className={`floating-pill deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
-                onClick={() => setDeepSearchEnabled((prev) => !prev)}
-                disabled={!token}
-                title="Use deep web research for next message"
-              >
-                {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
-              </button>
-              <button
                 className="floating-pill files-toggle-btn"
                 onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
                 disabled={!token}
@@ -2034,6 +2138,31 @@ export default function App() {
                   </button>
                 </div>
               )}
+              {(thinkingEnabled || deepSearchEnabled || attachedFiles.length > 0) && (
+                <div className="composer-active-row">
+                  {thinkingEnabled && (
+                    <button className="composer-active-pill" onClick={() => setThinkingEnabled(false)}>
+                      Thinking On <span className="composer-active-close">x</span>
+                    </button>
+                  )}
+                  {deepSearchEnabled && (
+                    <button className="composer-active-pill" onClick={() => setDeepSearchEnabled(false)}>
+                      Deep research On <span className="composer-active-close">x</span>
+                    </button>
+                  )}
+                  {attachedFiles.length > 0 && (
+                    <button
+                      className="composer-active-pill"
+                      onClick={() => {
+                        setAttachedFiles([]);
+                        setPendingAttachmentIds([]);
+                      }}
+                    >
+                      Files selected ({attachedFiles.length}) <span className="composer-active-close">x</span>
+                    </button>
+                  )}
+                </div>
+              )}
               {editingMessageId && (
                 <div className="edit-banner">
                   Editing previous message
@@ -2051,23 +2180,74 @@ export default function App() {
                 </div>
               )}
               <div className="input-wrapper">
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileAttachment}
-                  style={{ display: 'none' }}
-                  multiple
-                  accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx,.docx,.pptx"
-                  disabled={uploading}
-                />
-                <button
-                  className="attach-btn"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !!editingMessageId || !!shareToken || !token || (incognitoDraftSelected && !selectedSessionId)}
-                  title="Upload files and CSV analytics"
-                >
-                  +
-                </button>
+                <div className="composer-tools" ref={composerToolsRef}>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileAttachment}
+                    style={{ display: 'none' }}
+                    multiple
+                    accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx,.docx,.pptx,image/*"
+                    disabled={uploading}
+                  />
+                  <button
+                    className="attach-btn"
+                    onClick={() => setComposerMenuOpen((prev) => !prev)}
+                    disabled={uploading}
+                    title="Open quick actions"
+                  >
+                    +
+                  </button>
+                  {composerMenuOpen && (
+                    <div className="composer-menu" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => {
+                          fileInputRef.current?.click();
+                          setComposerMenuOpen(false);
+                        }}
+                        disabled={uploading || !!editingMessageId || !!shareToken || !token || (incognitoDraftSelected && !selectedSessionId)}
+                      >
+                        Add photos & files
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleCaptureScreenshot();
+                        }}
+                      >
+                        Take screenshot
+                      </button>
+                      <div className="composer-menu-divider" />
+                      <button
+                        className={thinkingEnabled ? "active" : ""}
+                        onClick={() => {
+                          setThinkingEnabled((prev) => {
+                            const next = !prev;
+                            if (next) setDeepSearchEnabled(false);
+                            return next;
+                          });
+                          setComposerMenuOpen(false);
+                        }}
+                      >
+                        {thinkingEnabled ? "Thinking On" : "Thinking"}
+                      </button>
+                      <button
+                        className={deepSearchEnabled ? "active" : ""}
+                        onClick={() => {
+                          setDeepSearchEnabled((prev) => {
+                            const next = !prev;
+                            if (next) setThinkingEnabled(false);
+                            return next;
+                          });
+                          setComposerMenuOpen(false);
+                        }}
+                        disabled={!token}
+                      >
+                        {deepSearchEnabled ? "Deep research On" : "Deep research"}
+                      </button>
+                      <div className="composer-model-label">Model: {activeModelLabel}</div>
+                    </div>
+                  )}
+                </div>
                 <textarea
                   placeholder="Ask anything"
                   value={input}
@@ -2078,9 +2258,9 @@ export default function App() {
                 <button
                   className="send-btn"
                   onClick={handleSend}
-                  disabled={loading || (!input.trim() && attachedFiles.length === 0)}
+                  disabled={!loading && (!input.trim() && attachedFiles.length === 0)}
                 >
-                  {loading ? "..." : editingMessageId ? "Resend" : "↗"}
+                  {loading ? "Stop" : editingMessageId ? "Resend" : "↗"}
                 </button>
               </div>
             </div>
@@ -2189,6 +2369,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

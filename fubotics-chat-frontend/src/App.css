@@ -1212,6 +1212,32 @@ a:hover {
   margin-bottom: 0.45rem;
 }
 
+.composer-active-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.composer-active-pill {
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  background: rgba(13, 44, 40, 0.7);
+  color: #d1fae5;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.composer-active-close {
+  font-weight: 700;
+  opacity: 0.9;
+}
+
 .share-continue-btn {
   border: 1px solid var(--border);
   background: #fff;
@@ -1266,6 +1292,61 @@ a:hover {
   gap: 0.4rem;
   align-items: flex-end;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.composer-tools {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.5rem);
+  width: 250px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 14px;
+  background: rgba(34, 34, 34, 0.98);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+  z-index: 120;
+}
+
+.composer-menu button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+  background: transparent;
+  color: #f3f4f6;
+  padding: 0.62rem 0.75rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.composer-menu button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.composer-menu button:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.composer-menu button.active {
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+}
+
+.composer-menu-divider {
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.composer-model-label {
+  padding: 0.56rem 0.75rem 0.62rem;
+  color: #cbd5e1;
+  font-size: 0.79rem;
 }
 
 .chat-area.landing-mode .input-wrapper {
