@@ -116,6 +116,8 @@ export default function App() {
   const [sessionAttachments, setSessionAttachments] = useState([]);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
+  const [openFloatingChatMenu, setOpenFloatingChatMenu] = useState(false);
+  const [openFloatingModelMenu, setOpenFloatingModelMenu] = useState(false);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
   const [pendingDeleteAccount, setPendingDeleteAccount] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -134,6 +136,15 @@ export default function App() {
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const copyResetTimerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem("pinnedSessionIds");
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((v) => Number.isInteger(v)) : [];
+    } catch {
+      return [];
+    }
+  });
   const [landingTitle, setLandingTitle] = useState(LANDING_TITLES[0]);
   const getSessionLabel = (session) => {
     if (session?.name) return session.name;
@@ -143,6 +154,16 @@ export default function App() {
   const filteredSessions = sessions.filter((session) =>
     getSessionLabel(session).toLowerCase().includes(sessionSearchQuery.trim().toLowerCase())
   );
+  const pinnedSet = new Set(pinnedSessionIds);
+  const orderedSessions = [...filteredSessions].sort((a, b) => {
+    const aPinned = pinnedSet.has(a.id) ? 1 : 0;
+    const bPinned = pinnedSet.has(b.id) ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+    return 0;
+  });
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
+  const showFloatingSessionMenu = token && !shareToken && !!selectedSession;
+  const showIncognitoDraftHint = token && !shareToken && !selectedSessionId;
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -257,6 +278,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("chatModel", selectedModel);
   }, [selectedModel]);
+
+  useEffect(() => {
+    localStorage.setItem("pinnedSessionIds", JSON.stringify(pinnedSessionIds));
+  }, [pinnedSessionIds]);
 
   useEffect(() => {
     if (chatWindowRef.current) {
@@ -645,6 +670,8 @@ export default function App() {
     setInput("");
     setEditingMessageId(null);
     setOpenSessionMenuId(null);
+    setOpenFloatingChatMenu(false);
+    setOpenFloatingModelMenu(false);
     setPendingDeleteSessionId(null);
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.delete("session");
@@ -679,6 +706,7 @@ export default function App() {
       const remaining = sessions.filter((s) => s.id !== sessionId);
 
       setSessions(remaining);
+      setPinnedSessionIds((prev) => prev.filter((id) => id !== sessionId));
       setPendingDeleteSessionId(null);
       setOpenSessionMenuId(null);
 
@@ -706,8 +734,9 @@ export default function App() {
   }
 
   async function handleShareSession(session, e) {
-    e.stopPropagation();
+    e?.stopPropagation?.();
     setOpenSessionMenuId(null);
+    setOpenFloatingChatMenu(false);
     let shareUrl = "";
     try {
       const res = await axios.post(`${API_BASE}/api/sessions/${session.id}/share`);
@@ -770,8 +799,9 @@ export default function App() {
   }
 
   async function handleRenameSession(session, e) {
-    e.stopPropagation();
+    e?.stopPropagation?.();
     setOpenSessionMenuId(null);
+    setOpenFloatingChatMenu(false);
     const nextName = window.prompt("Rename chat:", getSessionLabel(session));
     if (nextName === null) return;
     const clean = nextName.trim();
@@ -1074,9 +1104,19 @@ export default function App() {
 
   function handleChatAreaClick() {
     setOpenSessionMenuId(null);
+    setOpenFloatingChatMenu(false);
+    setOpenFloatingModelMenu(false);
     if (window.innerWidth <= 768 && sidebarVisible) {
       setSidebarVisible(false);
     }
+  }
+
+  function togglePinSession(sessionId) {
+    setPinnedSessionIds((prev) => {
+      if (prev.includes(sessionId)) return prev.filter((id) => id !== sessionId);
+      return [sessionId, ...prev];
+    });
+    setOpenFloatingChatMenu(false);
   }
 
   async function handleDownload(filename) {
@@ -1120,6 +1160,8 @@ export default function App() {
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
     setOpenSessionMenuId(null);
+    setOpenFloatingChatMenu(false);
+    setOpenFloatingModelMenu(false);
     setPendingDeleteSessionId(null);
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.set("session", String(sessionId));
@@ -1451,7 +1493,7 @@ export default function App() {
               </div>
             )}
 
-            {token && filteredSessions.map((session) => (
+            {token && orderedSessions.map((session) => (
               <div
                 key={session.id}
                 className={`session-item ${session.id === selectedSessionId ? 'active' : ''}`}
@@ -1460,6 +1502,7 @@ export default function App() {
                 <div className="session-icon">•</div>
                 <span className="session-name">
                   {getSessionLabel(session)}
+                  {pinnedSet.has(session.id) ? " (Pinned)" : ""}
                 </span>
                 <div
                   className="session-actions"
@@ -1483,6 +1526,9 @@ export default function App() {
                   {openSessionMenuId === session.id && (
                     <div className="session-menu" onClick={(e) => e.stopPropagation()}>
                       <>
+                          <button onClick={(e) => { e.stopPropagation(); togglePinSession(session.id); }}>
+                            {pinnedSet.has(session.id) ? "Unpin Chat" : "Pin Chat"}
+                          </button>
                           <button onClick={(e) => handleShareSession(session, e)}>Share Chat</button>
                           <button onClick={(e) => handleRenameSession(session, e)}>Rename Chat</button>
                           <button
@@ -1661,61 +1707,134 @@ export default function App() {
             className="toggle-sidebar-btn" 
             onClick={(e) => {
               e.stopPropagation();
+              setOpenFloatingModelMenu(false);
+              setOpenFloatingChatMenu(false);
               setSidebarVisible(!sidebarVisible);
             }}
             title={sidebarVisible ? "Hide chats" : "Show chats"}
           >
             <span className="toggle-icon">
-              {sidebarVisible ? '◀' : '▶'}
+              <span className="toggle-line" />
+              <span className="toggle-line" />
+              <span className="toggle-line" />
             </span>
           </button>
 
-          <div className="chat-column">
-            <header className="chat-header">
-              <div className="header-content">
-                <div className="header-icon" aria-hidden="true"></div>
-                <h1>NexaCore AI</h1>
-              </div>
-              <div className="header-actions">
-                {token && (
-                  <div className="model-select-wrap">
-                    <select
-                      className="model-select"
-                      value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      title="Select chat model"
-                    >
-                      {availableModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </select>
+          <div className="floating-chat-controls" onClick={(e) => e.stopPropagation()}>
+            <div className="floating-controls-left">
+              <button
+                className="floating-pill"
+                onClick={() => {
+                  setOpenFloatingChatMenu(false);
+                  setSidebarVisible((prev) => !prev);
+                }}
+                title={sidebarVisible ? "Hide chats" : "Show chats"}
+              >
+                <span className="toggle-icon floating-toggle-icon">
+                  <span className="toggle-line" />
+                  <span className="toggle-line" />
+                  <span className="toggle-line" />
+                </span>
+              </button>
+              <div className="floating-model-wrap">
+                <button
+                  className="floating-pill floating-model-btn"
+                  onClick={() => {
+                    if (!token) return;
+                    setOpenFloatingChatMenu(false);
+                    setOpenFloatingModelMenu((prev) => !prev);
+                  }}
+                  title={token ? "Choose model" : "Login to switch models"}
+                >
+                  NexaCore
+                </button>
+                {token && openFloatingModelMenu && (
+                  <div className="floating-menu floating-model-menu">
+                    {availableModels.map((model) => (
+                      <button
+                        key={model.id}
+                        className={model.id === selectedModel ? "active" : ""}
+                        onClick={() => {
+                          setSelectedModel(model.id);
+                          setOpenFloatingModelMenu(false);
+                        }}
+                        title={model.label}
+                      >
+                        {model.label}
+                      </button>
+                    ))}
                   </div>
                 )}
-                <button
-                  className={`deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
-                  onClick={() => setDeepSearchEnabled((prev) => !prev)}
-                  disabled={!token}
-                  title="Use deep web research for next message"
-                >
-                  {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
-                </button>
-                <button 
-                  className="files-toggle-btn"
-                  onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
-                  disabled={!token}
-                  title="Toggle Files"
-                >
-                  📁 Files
-                </button>
-                <div className="header-status">
-                  <span className="status-dot"></span>
-                  <span className="status-text">Online</span>
-                </div>
               </div>
-            </header>
+            </div>
+            <div className="floating-controls-right">
+              <button className="floating-pill floating-new-chat-btn" onClick={handleNewChat}>
+                New Chat
+              </button>
+              <button
+                className={`floating-pill deep-search-btn ${deepSearchEnabled ? "active" : ""}`}
+                onClick={() => setDeepSearchEnabled((prev) => !prev)}
+                disabled={!token}
+                title="Use deep web research for next message"
+              >
+                {deepSearchEnabled ? "Deep Search On" : "Deep Search"}
+              </button>
+              <button
+                className="floating-pill files-toggle-btn"
+                onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
+                disabled={!token}
+                title="Toggle Files"
+              >
+                Files
+              </button>
+              {showFloatingSessionMenu && (
+                <div className="floating-chat-menu-wrap">
+                  <button
+                    className="floating-pill floating-dots-btn"
+                    onClick={() => {
+                      setOpenFloatingModelMenu(false);
+                      setOpenFloatingChatMenu((prev) => !prev);
+                    }}
+                    title="Chat actions"
+                  >
+                    ...
+                  </button>
+                  {openFloatingChatMenu && selectedSession && (
+                    <div className="floating-menu">
+                      <button onClick={() => togglePinSession(selectedSession.id)}>
+                        {pinnedSet.has(selectedSession.id) ? "Unpin Chat" : "Pin Chat"}
+                      </button>
+                      <button onClick={() => handleShareSession(selectedSession)}>Share Chat</button>
+                      <button onClick={() => handleRenameSession(selectedSession)}>Rename Chat</button>
+                      <button
+                        className="danger"
+                        onClick={() => {
+                          setOpenFloatingChatMenu(false);
+                          setPendingDeleteSessionId(selectedSession.id);
+                        }}
+                      >
+                        Delete Chat
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {showIncognitoDraftHint && (
+                <button
+                  className="floating-pill floating-incognito-draft"
+                  title="Blank chat is currently unsaved"
+                  onClick={() => {
+                    setOpenFloatingChatMenu(false);
+                    setOpenFloatingModelMenu(false);
+                  }}
+                >
+                  . . Incognito Draft
+                </button>
+              )}
+            </div>
+          </div>
 
+          <div className="chat-column">
             <div className="chat-window" ref={chatWindowRef}>
               {isLandingMode && (
                 <div className="hero-title">{landingTitle}</div>
@@ -1999,6 +2118,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 
