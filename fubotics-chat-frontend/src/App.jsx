@@ -118,6 +118,7 @@ export default function App() {
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
   const [openFloatingChatMenu, setOpenFloatingChatMenu] = useState(false);
   const [openFloatingModelMenu, setOpenFloatingModelMenu] = useState(false);
+  const [incognitoDraftSelected, setIncognitoDraftSelected] = useState(false);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
   const [pendingDeleteAccount, setPendingDeleteAccount] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -130,6 +131,7 @@ export default function App() {
   const [authIntentMode, setAuthIntentMode] = useState("login");
   const [sharedMessages, setSharedMessages] = useState([]);
   const [anonymousMessages, setAnonymousMessages] = useState([]);
+  const [incognitoMessages, setIncognitoMessages] = useState([]);
   const [anonymousQuestionCount, setAnonymousQuestionCount] = useState(0);
   const [anonymousSharedQuestionCount, setAnonymousSharedQuestionCount] = useState(0);
   const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
@@ -162,8 +164,8 @@ export default function App() {
     return 0;
   });
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
-  const showFloatingSessionMenu = token && !shareToken && !!selectedSession;
-  const showIncognitoDraftHint = token && !shareToken && !selectedSessionId;
+  const showIncognitoDraftHint = token && !shareToken && !selectedSessionId && incognitoDraftSelected;
+  const showFloatingSessionMenu = token && !shareToken && !showIncognitoDraftHint;
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -287,7 +289,7 @@ export default function App() {
     if (chatWindowRef.current) {
       chatWindowRef.current.scrollTop = chatWindowRef.current.scrollHeight;
     }
-  }, [messages, isTyping]);
+  }, [messages, incognitoMessages, anonymousMessages, sharedMessages, isTyping]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -322,6 +324,8 @@ export default function App() {
       setSessions([]);
       setSelectedSessionId(null);
       setMessages([]);
+      setIncognitoMessages([]);
+      setIncognitoDraftSelected(false);
       setSessionAttachments([]);
     }
     rotateLandingTitle();
@@ -672,6 +676,8 @@ export default function App() {
     setOpenSessionMenuId(null);
     setOpenFloatingChatMenu(false);
     setOpenFloatingModelMenu(false);
+    setIncognitoDraftSelected(false);
+    setIncognitoMessages([]);
     setPendingDeleteSessionId(null);
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.delete("session");
@@ -691,6 +697,8 @@ export default function App() {
     if (!newSession?.id) throw new Error("Could not create session");
     setSessions((prev) => [newSession, ...prev]);
     setSelectedSessionId(newSession.id);
+    setIncognitoDraftSelected(false);
+    setIncognitoMessages([]);
     setMessages([]);
     setAttachedFiles([]);
     setPendingAttachmentIds([]);
@@ -930,6 +938,7 @@ export default function App() {
     const text = input.trim() || "(Sent files)";
     const isAnonymousSharedMode = !!shareToken && !token;
     const isAnonymousPublicMode = !token && !shareToken;
+    const isLoggedInIncognitoMode = !!token && !shareToken && incognitoDraftSelected && !selectedSessionId;
     const activeModel = token ? selectedModel : ANONYMOUS_DEFAULT_MODEL;
     if (
       (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) ||
@@ -970,7 +979,7 @@ export default function App() {
       content: text,
       attachments: attachedFiles.map(f => ({ filename: f.name }))
     };
-    if (!isAnonymousSharedMode && !isAnonymousPublicMode) {
+    if (!isAnonymousSharedMode && !isAnonymousPublicMode && !isLoggedInIncognitoMode) {
       setMessages((prev) => [...prev, tempMsg]);
     }
 
@@ -1027,6 +1036,24 @@ export default function App() {
         return;
       }
 
+      if (isLoggedInIncognitoMode) {
+        const tempUser = { id: Date.now(), role: "user", content: text };
+        setIncognitoMessages((prev) => [...prev, tempUser]);
+        const historyForApi = [...incognitoMessages, tempUser].map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const res = await axios.post(`${API_BASE}/api/public/chat`, {
+          content: text,
+          history: historyForApi,
+          model: activeModel,
+        });
+        const assistant = String(res.data?.assistant || "").trim() || "No reply";
+        setIncognitoMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
+        setInput("");
+        return;
+      }
+
       const targetSessionId = await ensureSessionForMessage(text);
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: targetSessionId,
@@ -1045,6 +1072,11 @@ export default function App() {
         ]);
       } else if (isAnonymousPublicMode) {
         setAnonymousMessages((prev) => [
+          ...prev,
+          { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
+        ]);
+      } else if (isLoggedInIncognitoMode) {
+        setIncognitoMessages((prev) => [
           ...prev,
           { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
         ]);
@@ -1159,6 +1191,8 @@ export default function App() {
 
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
+    setIncognitoDraftSelected(false);
+    setIncognitoMessages([]);
     setOpenSessionMenuId(null);
     setOpenFloatingChatMenu(false);
     setOpenFloatingModelMenu(false);
@@ -1434,7 +1468,13 @@ export default function App() {
     !isTyping &&
     (
       (!token && anonymousMessages.length === 0) ||
-      (token && (!selectedSessionId || (selectedSessionId && messages.length === 0)))
+      (
+        token &&
+        (
+          (incognitoDraftSelected && !selectedSessionId && incognitoMessages.length === 0) ||
+          (!incognitoDraftSelected && (!selectedSessionId || (selectedSessionId && messages.length === 0)))
+        )
+      )
     );
 
   return (
@@ -1799,22 +1839,36 @@ export default function App() {
                   >
                     ...
                   </button>
-                  {openFloatingChatMenu && selectedSession && (
+                  {openFloatingChatMenu && (
                     <div className="floating-menu">
-                      <button onClick={() => togglePinSession(selectedSession.id)}>
-                        {pinnedSet.has(selectedSession.id) ? "Unpin Chat" : "Pin Chat"}
-                      </button>
-                      <button onClick={() => handleShareSession(selectedSession)}>Share Chat</button>
-                      <button onClick={() => handleRenameSession(selectedSession)}>Rename Chat</button>
-                      <button
-                        className="danger"
-                        onClick={() => {
-                          setOpenFloatingChatMenu(false);
-                          setPendingDeleteSessionId(selectedSession.id);
-                        }}
-                      >
-                        Delete Chat
-                      </button>
+                      {selectedSession ? (
+                        <>
+                          <button onClick={() => togglePinSession(selectedSession.id)}>
+                            {pinnedSet.has(selectedSession.id) ? "Unpin Chat" : "Pin Chat"}
+                          </button>
+                          <button onClick={() => handleShareSession(selectedSession)}>Share Chat</button>
+                          <button onClick={() => handleRenameSession(selectedSession)}>Rename Chat</button>
+                          <button
+                            className="danger"
+                            onClick={() => {
+                              setOpenFloatingChatMenu(false);
+                              setPendingDeleteSessionId(selectedSession.id);
+                            }}
+                          >
+                            Delete Chat
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setIncognitoDraftSelected(true);
+                            setIncognitoMessages([]);
+                            setOpenFloatingChatMenu(false);
+                          }}
+                        >
+                          Use Incognito Draft
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1822,13 +1876,16 @@ export default function App() {
               {showIncognitoDraftHint && (
                 <button
                   className="floating-pill floating-incognito-draft"
-                  title="Blank chat is currently unsaved"
+                  title="Incognito draft mode is active"
                   onClick={() => {
+                    setIncognitoDraftSelected(false);
+                    setIncognitoMessages([]);
+                    setInput("");
                     setOpenFloatingChatMenu(false);
                     setOpenFloatingModelMenu(false);
                   }}
                 >
-                  . . Incognito Draft
+                  . . Incognito Draft (On)
                 </button>
               )}
             </div>
@@ -1882,12 +1939,26 @@ export default function App() {
                   </div>
                 ))
               }
-              {!isLandingMode && token && !shareToken && !selectedSessionId && (
+              {token && !shareToken && incognitoDraftSelected && !selectedSessionId &&
+                incognitoMessages.map((msg) => (
+                  <div
+                    key={msg.id + (msg.created_at || "")}
+                    className={`message-row ${msg.role === "user" ? "user-row" : "ai-row"}`}
+                  >
+                    <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
+                    <div className="bubble">
+                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
+                      <div className="content">{renderMessageContent(msg.content)}</div>
+                    </div>
+                  </div>
+                ))
+              }
+              {!isLandingMode && token && !shareToken && !selectedSessionId && (!incognitoDraftSelected || incognitoMessages.length === 0) && (
                 <div className="empty-state">
                   <div className="empty-state-content">
                     <div className="empty-state-icon">Start</div>
                     <h2>Welcome to NexaCore AI</h2>
-                    <p>Select a chat or create a new one to get started</p>
+                    <p>{incognitoDraftSelected ? "Incognito draft is active. Messages stay unsaved." : "Select a chat or create a new one to get started"}</p>
                   </div>
                 </div>
               )}
@@ -1992,7 +2063,7 @@ export default function App() {
                 <button
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading || !!editingMessageId || !!shareToken || !token}
+                  disabled={uploading || !!editingMessageId || !!shareToken || !token || (incognitoDraftSelected && !selectedSessionId)}
                   title="Upload files and CSV analytics"
                 >
                   +
