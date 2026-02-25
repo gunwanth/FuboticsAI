@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import html2canvas from "html2canvas";
+import nexacoreLogo from "./assets/nexacore-logo.svg";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -457,7 +458,9 @@ export default function App() {
       <div className="auth-screen">
         <div className="auth-card">
           <div className="auth-logo">
-            <div className="logo-icon" aria-hidden="true"></div>
+            <div className="logo-icon" aria-hidden="true">
+              <img src={nexacoreLogo} alt="NexaCore AI logo" className="logo-image" />
+            </div>
             <h2>NexaCore AI</h2>
           </div>
           <h3>
@@ -1596,7 +1599,9 @@ export default function App() {
         <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
           <div className="sidebar-header">
             <div className="brand">
-              <div className="brand-icon" aria-hidden="true"></div>
+              <div className="brand-icon" aria-hidden="true">
+                <img src={nexacoreLogo} alt="NexaCore AI logo" className="brand-logo-image" />
+              </div>
               <h2>NexaCore AI</h2>
             </div>
             <button className="new-chat-btn" onClick={handleNewChat}>
