@@ -1,0 +1,60 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="spaceBg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 256) rotate(90) scale(250)">
+      <stop offset="0" stop-color="#0B1B3D"/>
+      <stop offset="1" stop-color="#030712"/>
+    </radialGradient>
+    <linearGradient id="hexGlow" x1="118" y1="92" x2="394" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6EE7FF"/>
+      <stop offset="0.5" stop-color="#5B8CFF"/>
+      <stop offset="1" stop-color="#C084FC"/>
+    </linearGradient>
+    <radialGradient id="solarCore" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 256) rotate(90) scale(88)">
+      <stop offset="0" stop-color="#CFFAFE"/>
+      <stop offset="0.4" stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </radialGradient>
+    <linearGradient id="flare" x1="175" y1="188" x2="337" y2="334" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <filter id="softOuter" x="24" y="24" width="464" height="464" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="116" fill="url(#spaceBg)"/>
+
+  <g opacity="0.42" filter="url(#softOuter)">
+    <path d="M256 76L409 166V346L256 436L103 346V166L256 76Z" stroke="#7DD3FC" stroke-width="18"/>
+  </g>
+
+  <path d="M256 86L400 171V341L256 426L112 341V171L256 86Z" stroke="url(#hexGlow)" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M256 118L373 187V325L256 394L139 325V187L256 118Z" stroke="url(#hexGlow)" stroke-opacity="0.78" stroke-width="10" stroke-linejoin="round"/>
+
+  <circle cx="256" cy="256" r="90" stroke="url(#flare)" stroke-opacity="0.58" stroke-width="8"/>
+  <circle cx="256" cy="256" r="62" fill="url(#solarCore)"/>
+  <circle cx="256" cy="256" r="26" fill="#E0F2FE" fill-opacity="0.95"/>
+
+  <g stroke="url(#flare)" stroke-width="6" stroke-linecap="round" opacity="0.9">
+    <path d="M256 146V122"/>
+    <path d="M256 390V366"/>
+    <path d="M146 256H122"/>
+    <path d="M390 256H366"/>
+    <path d="M182 182L166 166"/>
+    <path d="M346 346L330 330"/>
+    <path d="M346 182L330 166"/>
+    <path d="M182 346L166 330"/>
+  </g>
+
+  <g stroke="url(#flare)" stroke-width="4.5" stroke-linecap="round" opacity="0.82">
+    <path d="M225 217L192 188"/>
+    <path d="M287 295L320 324"/>
+    <path d="M295 225L324 192"/>
+    <path d="M217 287L188 320"/>
+    <path d="M256 205L256 176"/>
+    <path d="M307 256H336"/>
+    <path d="M256 307V336"/>
+    <path d="M205 256H176"/>
+  </g>
+</svg>

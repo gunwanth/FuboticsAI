@@ -1,0 +1,20 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="favBg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(32 32) rotate(90) scale(30)">
+      <stop offset="0" stop-color="#0B1B3D"/>
+      <stop offset="1" stop-color="#030712"/>
+    </radialGradient>
+    <linearGradient id="favHex" x1="15" y1="12" x2="49" y2="52" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6EE7FF"/>
+      <stop offset="1" stop-color="#C084FC"/>
+    </linearGradient>
+    <radialGradient id="favCore" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(32 32) rotate(90) scale(12)">
+      <stop offset="0" stop-color="#E0F2FE"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#favBg)"/>
+  <path d="M32 9L51 20V44L32 55L13 44V20L32 9Z" stroke="url(#favHex)" stroke-width="3.2" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="11.5" fill="url(#favCore)"/>
+  <circle cx="32" cy="32" r="4.5" fill="#F0FDFF"/>
+</svg>
