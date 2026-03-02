@@ -277,6 +277,15 @@ a:hover {
   background: rgba(255, 255, 255, 0.14);
 }
 
+.new-chat-btn.icon-only {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 999px;
+  align-self: flex-start;
+}
+
 .search-chats-btn {
   width: 100%;
   border-radius: 10px;
@@ -698,7 +707,9 @@ a:hover {
 }
 
 .floating-new-chat-btn {
-  min-width: 126px;
+  min-width: 52px;
+  width: 52px;
+  padding: 0;
   font-weight: 600;
 }
 
@@ -1065,6 +1076,10 @@ a:hover {
   padding: 0.18rem 0.48rem;
   background: #eef2f7;
   color: #334155;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  cursor: pointer;
+  text-align: left;
+  appearance: none;
 }
 
 .user-row .attachment-badge {
@@ -1072,16 +1087,102 @@ a:hover {
   color: #fff;
 }
 
+.pasted-code-file-card {
+  border-radius: 12px;
+  padding: 0.55rem 0.62rem;
+  min-width: 170px;
+  max-width: 220px;
+  background: linear-gradient(160deg, rgba(39, 39, 42, 0.94), rgba(63, 63, 70, 0.88));
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+}
+
+.pasted-code-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  line-height: 1.25;
+  font-size: 0.72rem;
+  color: #d1d5db;
+}
+
+.pasted-code-tag {
+  display: inline-block;
+  margin-top: 0.42rem;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(17, 24, 39, 0.7);
+  color: #e5e7eb;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  font-weight: 700;
+  padding: 0.16rem 0.35rem;
+}
+
+.pasted-code-inline-card {
+  border-radius: 12px;
+  padding: 0.6rem 0.7rem;
+  max-width: 320px;
+  background: linear-gradient(160deg, rgba(39, 39, 42, 0.94), rgba(63, 63, 70, 0.88));
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+  margin: 0.3rem 0;
+}
+
+.pasted-code-inline-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  font-size: 0.72rem;
+  color: #d1d5db;
+}
+
+.pasted-code-inline-download {
+  margin-top: 0.45rem;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: rgba(17, 24, 39, 0.78);
+  color: #f8fafc;
+  font-size: 0.72rem;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+}
+
+.pasted-code-inline-download:hover {
+  background: rgba(30, 41, 59, 0.85);
+}
+
+.pasted-code-inline-hint {
+  margin-top: 0.42rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: #cbd5e1;
+}
+
 .typing-indicator {
   border-radius: 14px;
   border: 1px solid var(--border);
   background: #fff;
   padding: 0.58rem 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
 }
 
 .typing-dots {
   display: flex;
   gap: 0.24rem;
+}
+
+.typing-status-text {
+  font-size: 0.76rem;
+  color: #64748b;
+  white-space: nowrap;
 }
 
 .typing-dot {
@@ -1278,6 +1379,76 @@ a:hover {
   padding: 0.42rem;
 }
 
+.composer-code-card {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: linear-gradient(160deg, rgba(39, 39, 42, 0.95), rgba(63, 63, 70, 0.9));
+  border-radius: 12px;
+  padding: 0.52rem 0.58rem;
+  margin-bottom: 0.45rem;
+}
+
+.composer-code-card-name {
+  font-size: 0.77rem;
+  color: #e2e8f0;
+  word-break: break-all;
+}
+
+.composer-code-card-meta {
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: #cbd5e1;
+}
+
+.composer-code-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-top: 0.42rem;
+}
+
+.composer-code-download-btn,
+.composer-code-clear-btn {
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(17, 24, 39, 0.75);
+  color: #f8fafc;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.46rem;
+  cursor: pointer;
+}
+
+.composer-code-clear-btn {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fecaca;
+}
+
+.composer-code-reply-btn {
+  margin-top: 0.48rem;
+  width: 100%;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  background: rgba(20, 83, 45, 0.75);
+  color: #dcfce7;
+  border-radius: 10px;
+  padding: 0.34rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.composer-code-reply-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.composer-code-inline {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: linear-gradient(160deg, rgba(39, 39, 42, 0.94), rgba(63, 63, 70, 0.88));
+  border-radius: 12px;
+  padding: 0.5rem 0.56rem;
+}
+
 .attached-file-item {
   display: inline-flex;
   align-items: center;
@@ -1305,9 +1476,19 @@ a:hover {
   border-radius: 999px;
   padding: 0.5rem 0.55rem;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
   align-items: flex-end;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.input-wrapper.with-code-draft {
+  border-radius: 20px;
+  padding: 0.65rem;
+}
+
+.input-wrapper.with-code-draft textarea {
+  min-height: 56px;
 }
 
 .composer-tools {
@@ -1387,6 +1568,7 @@ a:hover {
 
 .attach-btn,
 .csv-upload-btn,
+.files-inline-btn,
 .send-btn {
   width: 40px;
   height: 40px;
@@ -1415,8 +1597,18 @@ a:hover {
 }
 
 .attach-btn:hover:not(:disabled),
-.csv-upload-btn:hover:not(:disabled) {
+.csv-upload-btn:hover:not(:disabled),
+.files-inline-btn:hover:not(:disabled) {
   background: rgba(51, 65, 85, 0.85);
+}
+
+.files-inline-btn {
+  width: auto;
+  min-width: 66px;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
 .send-btn {
@@ -1444,6 +1636,7 @@ a:hover {
 
 .attach-btn:disabled,
 .csv-upload-btn:disabled,
+.files-inline-btn:disabled,
 .send-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -1527,24 +1720,25 @@ a:hover {
   font-size: 0.82rem;
 }
 
+.no-session-message.compact {
+  margin-bottom: 0.35rem;
+  border: none;
+  background: transparent;
+  padding: 0.1rem 0.15rem;
+  color: #94a3b8;
+  font-size: 0.76rem;
+}
+
 .file-item {
   border: 1px solid rgba(148, 163, 184, 0.2);
   background: rgba(15, 23, 42, 0.6);
   border-radius: 10px;
   padding: 0.48rem;
   display: grid;
-  grid-template-columns: 28px 1fr auto;
+  grid-template-columns: 1fr auto;
   gap: 0.45rem;
   align-items: center;
-}
-
-.file-icon-wrapper {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: #eef2ff;
-  display: grid;
-  place-items: center;
+  min-width: 0;
 }
 
 .file-name-text {
@@ -1553,6 +1747,12 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
+}
+
+.file-info-wrapper {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .file-size-text {
@@ -1566,6 +1766,8 @@ a:hover {
   border-radius: 8px;
   padding: 0.22rem 0.44rem;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .file-download-btn:hover {

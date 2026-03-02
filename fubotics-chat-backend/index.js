@@ -29,6 +29,7 @@ const shareChatModel = require("./models/shareChat");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
 
 // ---------- CORS (dynamic allowlist) ----------
 const defaultOrigins = [
@@ -52,7 +53,8 @@ const ALLOWED_ORIGINS = Array.from(
   new Set([...envList, ...defaultOrigins].map(normalizeOrigin).filter(Boolean))
 );
 
-app.use(express.json());
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 
 // Cookie parser for refresh tokens
 app.use(cookieParser());
@@ -686,9 +688,139 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
   }
 }
 
+function buildPromptBasedBasename(prompt, fallback) {
+  const raw = String(prompt || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) return fallback;
+  const stop = new Set(["generate", "create", "make", "please", "a", "an", "the", "for", "to", "of", "with", "and"]);
+  const parts = raw
+    .split(" ")
+    .filter((w) => w && !stop.has(w))
+    .slice(0, 6);
+  if (parts.length === 0) return fallback;
+  return parts.join("_");
+}
+
+function buildGeneratedFilename(prompt, type, ext) {
+  const fallbackByType = {
+    document: "document",
+    pdf: "report",
+    ppt: "presentation",
+    notes: "notes",
+    image: "image",
+  };
+  const base = buildPromptBasedBasename(prompt, fallbackByType[type] || "file");
+  const stamp = Date.now();
+  return `${base}_${stamp}.${ext}`;
+}
+
+function getCodeExtension(language) {
+  const lang = String(language || "").trim().toLowerCase();
+  const map = {
+    javascript: "js",
+    js: "js",
+    typescript: "ts",
+    ts: "ts",
+    jsx: "jsx",
+    tsx: "tsx",
+    python: "py",
+    py: "py",
+    java: "java",
+    c: "c",
+    cpp: "cpp",
+    "c++": "cpp",
+    csharp: "cs",
+    cs: "cs",
+    go: "go",
+    rust: "rs",
+    ruby: "rb",
+    php: "php",
+    swift: "swift",
+    kotlin: "kt",
+    sql: "sql",
+    html: "html",
+    css: "css",
+    json: "json",
+    yaml: "yml",
+    yml: "yml",
+    bash: "sh",
+    shell: "sh",
+    sh: "sh",
+  };
+  return map[lang] || "txt";
+}
+
+async function offloadLargeCodeBlocksToFiles(sessionId, prompt, replyText, minLines = 100) {
+  const text = String(replyText || "");
+  const regex = /(```|~~~)\s*([^\n`]*)\r?\n([\s\S]*?)\r?\n?\1[ \t]*/g;
+  const matches = Array.from(text.matchAll(regex));
+  if (matches.length === 0) {
+    return { content: text, attachments: [] };
+  }
+  const totalCodeLines = matches.reduce((sum, match) => {
+    const code = String(match[3] || "");
+    return sum + code.split(/\r?\n/).length;
+  }, 0);
+  const exportAllCodeBlocks = totalCodeLines > minLines;
+
+  const attachments = [];
+  const segments = [];
+  let cursor = 0;
+  let exportedCount = 0;
+
+  for (const match of matches) {
+    const start = match.index || 0;
+    const end = start + match[0].length;
+    const language = String(match[2] || "").trim();
+    const code = String(match[3] || "");
+    const lines = code.split(/\r?\n/).length;
+
+    segments.push(text.slice(cursor, start));
+
+    if (exportAllCodeBlocks || lines > minLines) {
+      exportedCount += 1;
+      const ext = getCodeExtension(language);
+      const filename = buildGeneratedFilename(`${prompt} code ${exportedCount}`, "document", ext);
+      const filePath = path.join(generatedDir, filename);
+      fs.writeFileSync(filePath, code, "utf8");
+
+      const attachment = await attachmentModel.create(
+        sessionId,
+        filename,
+        filename,
+        filePath,
+        "text/plain",
+        fs.statSync(filePath).size,
+        JSON.stringify({ type: "generated_code", prompt, language, lines }),
+        true
+      );
+      attachments.push(attachment);
+      segments.push(
+        `\n[PASTED CODE FILE] ${filename} (${lines} lines)\n` +
+        `This code was sent as a file because it is longer than ${minLines} lines.\n` +
+        `Reply with what you want me to do next: explain, debug, refactor, optimize, test, or convert it.\n`
+      );
+    } else {
+      segments.push(match[0]);
+    }
+
+    cursor = end;
+  }
+
+  segments.push(text.slice(cursor));
+  const merged = segments.join("").trim();
+  return {
+    content: merged || "Code generated and exported to files.",
+    attachments,
+  };
+}
+
 async function generateDocumentFile(sessionId, prompt, contextText = "") {
   const content = await generateNarrative(prompt, "word document", contextText);
-  const filename = `document_${Date.now()}.docx`;
+  const filename = buildGeneratedFilename(prompt, "document", "docx");
   const filePath = path.join(generatedDir, filename);
   const doc = new Document({
     sections: [
@@ -716,7 +848,7 @@ async function generateDocumentFile(sessionId, prompt, contextText = "") {
 
 async function generatePdfFile(sessionId, prompt, contextText = "") {
   const content = await generateNarrative(prompt, "pdf report", contextText);
-  const filename = `document_${Date.now()}.pdf`;
+  const filename = buildGeneratedFilename(prompt, "pdf", "pdf");
   const filePath = path.join(generatedDir, filename);
   await new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 40 });
@@ -750,7 +882,7 @@ async function generatePptFile(sessionId, prompt, contextText = "") {
     .map((line) => line.replace(/^[-*\d.\s]+/, "").trim())
     .filter(Boolean)
     .slice(0, 8);
-  const filename = `presentation_${Date.now()}.pptx`;
+  const filename = buildGeneratedFilename(prompt, "ppt", "pptx");
   const filePath = path.join(generatedDir, filename);
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
@@ -778,7 +910,7 @@ async function generatePptFile(sessionId, prompt, contextText = "") {
 
 async function generateNotesFile(sessionId, prompt, contextText = "") {
   const content = await generateNarrative(prompt, "structured study notes in markdown", contextText);
-  const filename = `notes_${Date.now()}.md`;
+  const filename = buildGeneratedFilename(prompt, "notes", "md");
   const filePath = path.join(generatedDir, filename);
   fs.writeFileSync(filePath, content, "utf8");
   return attachmentModel.create(
@@ -1026,7 +1158,7 @@ async function generateImageFile(sessionId, prompt) {
     : imageMime.includes("webp")
     ? "webp"
     : "png";
-  const filename = `image_${Date.now()}.${ext}`;
+  const filename = buildGeneratedFilename(prompt, "image", ext);
   const filePath = path.join(generatedDir, filename);
   fs.writeFileSync(filePath, imageBuffer);
   return attachmentModel.create(
@@ -1042,7 +1174,21 @@ async function generateImageFile(sessionId, prompt) {
 }
 
 function detectGenerationRequest(content) {
-  const text = (content || "").toLowerCase();
+  const raw = String(content || "");
+  const text = raw.toLowerCase();
+  const fencedRegex = /(```|~~~)\s*([^\n`]*)\r?\n([\s\S]*?)\r?\n?\1[ \t]*/g;
+  const fencedBlocks = Array.from(raw.matchAll(fencedRegex));
+  const fencedLines = fencedBlocks.reduce((sum, m) => sum + String(m[3] || "").split(/\r?\n/).length, 0);
+  const plainLines = raw.split(/\r?\n/);
+  const nonEmpty = plainLines.filter((l) => l.trim().length > 0);
+  const codeLikeCount = nonEmpty.filter((l) =>
+    /[{}();=<>]|^\s*(const|let|var|function|class|if|for|while|import|export|def|return|public|private|static|async|await)\b/i.test(l)
+  ).length;
+  const isLikelyCodePayload =
+    fencedLines > 40 ||
+    (nonEmpty.length > 80 && codeLikeCount >= Math.max(20, Math.ceil(nonEmpty.length * 0.2)));
+  if (isLikelyCodePayload) return null;
+
   const asksForCreation =
     text.includes("generate") ||
     text.includes("create") ||
@@ -1380,7 +1526,11 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
           .join("\n");
         aiReply += `\n\nSources:\n${links}`;
       }
-      await messageModel.create(parsedSessionId, "assistant", aiReply);
+      const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
+      const assistantRecord = await messageModel.create(parsedSessionId, "assistant", codeExport.content);
+      for (const attachment of codeExport.attachments) {
+        await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+      }
     }
     
     const messages = await messageModel.getBySessionId(parsedSessionId);
@@ -1548,6 +1698,9 @@ app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) =
 
 app.post("/api/public/share/:token/chat", async (req, res) => {
   try {
+    if (req.headers.authorization) {
+      return res.status(403).json({ error: "Public share chat is disabled for logged-in sessions" });
+    }
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "sambanova").trim().toLowerCase();
@@ -1575,6 +1728,9 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
 
 app.post("/api/public/chat", async (req, res) => {
   try {
+    if (req.headers.authorization) {
+      return res.status(403).json({ error: "Public chat is disabled for logged-in sessions" });
+    }
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     const thinking = !!req.body?.thinking;
@@ -1667,7 +1823,11 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;
       }
-      await messageModel.create(targetMessage.session_id, "assistant", aiReply);
+      const codeExport = await offloadLargeCodeBlocksToFiles(targetMessage.session_id, normalizedContent, aiReply, 100);
+      const assistantRecord = await messageModel.create(targetMessage.session_id, "assistant", codeExport.content);
+      for (const attachment of codeExport.attachments) {
+        await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+      }
     }
 
     const messages = await messageModel.getBySessionId(targetMessage.session_id);
@@ -1802,6 +1962,16 @@ app.get("/api/attachments", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("GET /api/attachments error:", err);
     res.status(500).json({ error: "Failed to fetch attachments" });
+  }
+});
+
+app.get("/api/attachments/all", authMiddleware, async (req, res) => {
+  try {
+    const attachments = await attachmentModel.getByUserId(req.user.id);
+    res.json({ attachments });
+  } catch (err) {
+    console.error("GET /api/attachments/all error:", err);
+    res.status(500).json({ error: "Failed to fetch user attachments" });
   }
 });
 
@@ -2001,6 +2171,21 @@ function computeStats(data, columns) {
   });
   return stats;
 }
+
+// Global error handler (including request body size violations)
+app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({
+      error: "Request payload too large",
+      detail: `Reduce message size or increase REQUEST_BODY_LIMIT (current: ${REQUEST_BODY_LIMIT})`,
+    });
+  }
+  if (err) {
+    console.error("Unhandled server error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+  next();
+});
 
 // Start server
 initializeApp().then(() => {

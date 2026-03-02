@@ -101,6 +101,7 @@ export default function App() {
   const [selectedSessionId, setSelectedSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [composerCodeDraft, setComposerCodeDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth > 768);
   const [filesSidebarVisible, setFilesSidebarVisible] = useState(false);
@@ -116,6 +117,7 @@ export default function App() {
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
+  const [allUserAttachments, setAllUserAttachments] = useState([]);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
   const [openFloatingChatMenu, setOpenFloatingChatMenu] = useState(false);
@@ -144,6 +146,8 @@ export default function App() {
   const composerToolsRef = useRef(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [processSteps, setProcessSteps] = useState([]);
+  const [processStepIndex, setProcessStepIndex] = useState(0);
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const raw = localStorage.getItem("pinnedSessionIds");
@@ -175,6 +179,7 @@ export default function App() {
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
     : "SambaNova (Anonymous)";
+  const activeProcessStatus = processSteps[processStepIndex] || "Generating response...";
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -311,6 +316,37 @@ export default function App() {
   }, [sidebarVisible]);
 
   useEffect(() => {
+    if (!isTyping || processSteps.length <= 1) return;
+    const timer = setInterval(() => {
+      setProcessStepIndex((prev) => (prev + 1) % processSteps.length);
+    }, 1600);
+    return () => clearInterval(timer);
+  }, [isTyping, processSteps]);
+
+  function inferProcessSteps(text, options = {}) {
+    const prompt = String(text || "").toLowerCase();
+    if (options.editing) {
+      return ["Updating message...", "Rebuilding answer...", "Finalizing edit..."];
+    }
+    if (options.deepSearch) {
+      return ["Searching sources...", "Reading pages...", "Building cited answer..."];
+    }
+    if (options.thinking) {
+      return ["Thinking deeply...", "Evaluating options...", "Composing response..."];
+    }
+    if (options.hasFiles) {
+      return ["Processing files...", "Extracting context...", "Generating answer..."];
+    }
+    if (/generate|create|make|export|convert|prepare/.test(prompt) && /image|pdf|ppt|doc|docx|notes|document/.test(prompt)) {
+      return ["Preparing content...", "Generating file...", "Attaching downloadable output..."];
+    }
+    if (/code|function|class|api|bug|debug|fix|refactor/.test(prompt)) {
+      return ["Analyzing code request...", "Generating solution...", "Formatting output..."];
+    }
+    return ["Understanding prompt...", "Generating response...", "Finalizing output..."];
+  }
+
+  useEffect(() => {
     const handlePointerDown = (event) => {
       if (!composerToolsRef.current) return;
       if (!composerToolsRef.current.contains(event.target)) {
@@ -341,6 +377,9 @@ export default function App() {
     if (token) {
       localStorage.setItem("accessToken", token);
       axios.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+      setComposerCodeDraft(null);
+      setIncognitoDraftSelected(false);
+      setIncognitoMessages([]);
       fetchSessions();
       fetchCurrentUser();
     } else {
@@ -354,10 +393,23 @@ export default function App() {
       setMessages([]);
       setIncognitoMessages([]);
       setIncognitoDraftSelected(false);
+      setComposerCodeDraft(null);
       setSessionAttachments([]);
+      setAllUserAttachments([]);
     }
     rotateLandingTitle();
   }, [token]);
+
+  useEffect(() => {
+    if (!token || !filesSidebarVisible) return;
+    fetchAllUserAttachments();
+    if (selectedSessionId) {
+      axios
+        .get(`${API_BASE}/api/attachments`, { params: { sessionId: selectedSessionId } })
+        .then((res) => setSessionAttachments(res.data.attachments || []))
+        .catch(() => setSessionAttachments([]));
+    }
+  }, [token, filesSidebarVisible, selectedSessionId]);
 
   function AuthScreen() {
     const [localUser, setLocalUser] = useState("");
@@ -582,17 +634,36 @@ export default function App() {
       const res = await axios.get(`${API_BASE}/api/sessions`);
       const list = res.data.sessions || [];
       setSessions(list);
+      await fetchAllUserAttachments();
 
-      if (list.length > 0) {
-        const searchParams = new URLSearchParams(window.location.search);
-        const requested = Number.parseInt(searchParams.get("session") || "", 10);
-        const hasRequested = Number.isInteger(requested) && list.some((s) => s.id === requested);
-        const target = hasRequested ? requested : list[0].id;
-        setSelectedSessionId(target);
-        await fetchMessages(target);
+      const searchParams = new URLSearchParams(window.location.search);
+      const requested = Number.parseInt(searchParams.get("session") || "", 10);
+      const hasRequested = Number.isInteger(requested) && list.some((s) => s.id === requested);
+      if (hasRequested) {
+        setSelectedSessionId(requested);
+        await fetchMessages(requested);
+      } else {
+        setSelectedSessionId(null);
+        setMessages([]);
+        setSessionAttachments([]);
+        searchParams.delete("session");
+        const next = new URL(window.location.href);
+        next.search = searchParams.toString();
+        window.history.replaceState({}, "", next.toString());
       }
     } catch (err) {
       console.error("Error loading sessions", err);
+    }
+  }
+
+  async function fetchAllUserAttachments() {
+    if (!token) return;
+    try {
+      const res = await axios.get(`${API_BASE}/api/attachments/all`);
+      setAllUserAttachments(res.data.attachments || []);
+    } catch (err) {
+      console.error("Error loading user attachments", err);
+      setAllUserAttachments([]);
     }
   }
 
@@ -701,6 +772,7 @@ export default function App() {
     setMessages([]);
     setAttachedFiles([]);
     setPendingAttachmentIds([]);
+    setComposerCodeDraft(null);
     setInput("");
     setEditingMessageId(null);
     setOpenSessionMenuId(null);
@@ -767,6 +839,7 @@ export default function App() {
         setAttachedFiles([]);
         setPendingAttachmentIds([]);
       }
+      await fetchAllUserAttachments();
     } catch (err) {
       console.error("Error deleting session", err);
     }
@@ -948,6 +1021,7 @@ export default function App() {
         });
         setSessionAttachments(attRes.data.attachments || []);
       }
+      await fetchAllUserAttachments();
     } catch (error) {
       console.error('Upload error:', error);
       alert('Failed to upload files: ' + (error.response?.data?.error || error.message));
@@ -988,7 +1062,7 @@ export default function App() {
     }
   }
 
-  async function handleSend() {
+  async function handleSend(options = null) {
     if (loading) {
       if (activeRequestControllerRef.current) {
         activeRequestControllerRef.current.abort();
@@ -996,6 +1070,8 @@ export default function App() {
       }
       setLoading(false);
       setIsTyping(false);
+      setProcessSteps([]);
+      setProcessStepIndex(0);
       if (editingMessageId) {
         setEditingMessageId(null);
         if (selectedSessionId && token) {
@@ -1004,12 +1080,21 @@ export default function App() {
       }
       return;
     }
-    if (!input.trim() && attachedFiles.length === 0) return;
+    const resolvedOptions = options && typeof options === "object" ? options : {};
+    const codeDraftToSend = resolvedOptions.codeDraft || composerCodeDraft;
+    const typedInput = input.trim();
+    if (!codeDraftToSend && !typedInput && attachedFiles.length === 0) return;
 
-    const text = input.trim() || "(Sent files)";
+    const followupForCode = String(resolvedOptions.replyText ?? typedInput).trim();
+    const text = codeDraftToSend
+      ? `[PASTED CODE FILE] ${codeDraftToSend.filename} (${codeDraftToSend.lines} lines)\n\n\`\`\`${codeDraftToSend.language || "txt"}\n${codeDraftToSend.content}\n\`\`\`\n\n${followupForCode || "Please analyze this code and tell me what to improve."}`
+      : (typedInput || "(Sent files)");
+    const displayText = codeDraftToSend
+      ? `[PASTED CODE FILE] ${codeDraftToSend.filename} (${codeDraftToSend.lines} lines)\n${followupForCode || "Please analyze this code."}`
+      : text;
     const isAnonymousSharedMode = !!shareToken && !token;
     const isAnonymousPublicMode = !token && !shareToken;
-    const isLoggedInIncognitoMode = !!token && !shareToken && incognitoDraftSelected && !selectedSessionId;
+    const isLoggedInIncognitoMode = false;
     const activeModel = token ? selectedModel : ANONYMOUS_DEFAULT_MODEL;
     if (
       (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) ||
@@ -1020,6 +1105,13 @@ export default function App() {
     }
     setLoading(true);
     setComposerMenuOpen(false);
+    setProcessSteps(inferProcessSteps(text, {
+      editing: !!editingMessageId,
+      deepSearch: deepSearchEnabled,
+      thinking: thinkingEnabled,
+      hasFiles: attachedFiles.length > 0,
+    }));
+    setProcessStepIndex(0);
     const requestController = new AbortController();
     activeRequestControllerRef.current = requestController;
 
@@ -1029,6 +1121,8 @@ export default function App() {
         setEditingMessageId(null);
         setLoading(false);
         setIsTyping(false);
+        setProcessSteps([]);
+        setProcessStepIndex(0);
         return;
       }
       try {
@@ -1056,11 +1150,16 @@ export default function App() {
         setLoading(false);
         setIsTyping(false);
         setDeepSearchEnabled(false);
+        setProcessSteps([]);
+        setProcessStepIndex(0);
       }
       return;
     }
 
     setInput("");
+    if (codeDraftToSend) {
+      setComposerCodeDraft(null);
+    }
     let optimisticTempId = null;
 
     // Optimistic UI
@@ -1068,7 +1167,7 @@ export default function App() {
       id: `temp-${Date.now()}`,
       isTemporary: true,
       role: "user",
-      content: text,
+      content: displayText,
       attachments: attachedFiles.map(f => ({ filename: f.name }))
     };
     optimisticTempId = tempMsg.id;
@@ -1131,25 +1230,6 @@ export default function App() {
         return;
       }
 
-      if (isLoggedInIncognitoMode) {
-        const tempUser = { id: Date.now(), role: "user", content: text };
-        setIncognitoMessages((prev) => [...prev, tempUser]);
-        const historyForApi = [...incognitoMessages, tempUser].map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
-        const res = await axios.post(`${API_BASE}/api/public/chat`, {
-          content: text,
-          history: historyForApi,
-          thinking: thinkingEnabled,
-          model: activeModel,
-        }, { signal: requestController.signal });
-        const assistant = String(res.data?.assistant || "").trim() || "No reply";
-        setIncognitoMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
-        setInput("");
-        return;
-      }
-
       const targetSessionId = await ensureSessionForMessage(text);
       const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: targetSessionId,
@@ -1165,7 +1245,12 @@ export default function App() {
         if (optimisticTempId) {
           setMessages((prev) => prev.filter((m) => String(m.id) !== String(optimisticTempId)));
         }
-        setInput(text);
+        if (codeDraftToSend) {
+          setComposerCodeDraft(codeDraftToSend);
+          setInput(followupForCode);
+        } else {
+          setInput(text);
+        }
         return;
       }
       console.error("Send error", err);
@@ -1176,11 +1261,6 @@ export default function App() {
         ]);
       } else if (isAnonymousPublicMode) {
         setAnonymousMessages((prev) => [
-          ...prev,
-          { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
-        ]);
-      } else if (isLoggedInIncognitoMode) {
-        setIncognitoMessages((prev) => [
           ...prev,
           { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
         ]);
@@ -1201,6 +1281,8 @@ export default function App() {
       setLoading(false);
       setIsTyping(false);
       setDeepSearchEnabled(false);
+      setProcessSteps([]);
+      setProcessStepIndex(0);
     }
   }
 
@@ -1221,12 +1303,55 @@ export default function App() {
   function cancelEditingMessage() {
     setEditingMessageId(null);
     setInput("");
+    setComposerCodeDraft(null);
+  }
+
+  function detectComposerCodeDraft(text) {
+    const value = String(text || "");
+    if (!value.trim()) return null;
+
+    const fencedRegex = /(```|~~~)\s*([^\n`]*)\r?\n([\s\S]*?)\r?\n?\1[ \t]*/g;
+    const blocks = Array.from(value.matchAll(fencedRegex));
+    if (blocks.length > 0) {
+      const totalLines = blocks.reduce((sum, m) => sum + String(m[3] || "").split(/\r?\n/).length, 0);
+      if (totalLines > 100) {
+        const rawLang = String(blocks[0]?.[2] || "").trim();
+        const primaryLang = rawLang || inferCodeLanguageFromContent(value);
+        const filename = buildInlineCodeFilename(primaryLang, value, 0);
+        return { filename, content: value, lines: totalLines, language: primaryLang };
+      }
+      return null;
+    }
+
+    const lines = value.split(/\r?\n/);
+    const nonEmpty = lines.filter((l) => l.trim().length > 0);
+    if (nonEmpty.length <= 100) return null;
+    const codeLikeCount = nonEmpty.filter((l) =>
+      /[{}();=<>]|^\s*(const|let|var|function|class|if|for|while|import|export|def|return|public|private|static|async|await)\b/.test(l)
+    ).length;
+    if (codeLikeCount >= Math.max(20, Math.ceil(nonEmpty.length * 0.2))) {
+      const guessedLang = inferCodeLanguageFromContent(value);
+      const filename = buildInlineCodeFilename(guessedLang, value, 0);
+      return { filename, content: value, lines: nonEmpty.length, language: guessedLang };
+    }
+    return null;
+  }
+
+  function handleComposerInputChange(e) {
+    const nextValue = String(e.target.value || "");
+    const draft = detectComposerCodeDraft(nextValue);
+    if (draft) {
+      setComposerCodeDraft(draft);
+      setInput("");
+      return;
+    }
+    setInput(nextValue);
   }
 
   function handleKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      handleSend(composerCodeDraft ? { codeDraft: composerCodeDraft } : undefined);
     }
   }
 
@@ -1303,6 +1428,84 @@ export default function App() {
     }
   }
 
+  function buildInlineCodeFilename(language, code, index) {
+    const lang = String(language || "txt").toLowerCase();
+    const extMap = {
+      javascript: "js",
+      js: "js",
+      typescript: "ts",
+      ts: "ts",
+      jsx: "jsx",
+      tsx: "tsx",
+      python: "py",
+      py: "py",
+      java: "java",
+      c: "c",
+      cpp: "cpp",
+      "c++": "cpp",
+      csharp: "cs",
+      cs: "cs",
+      go: "go",
+      rust: "rs",
+      ruby: "rb",
+      php: "php",
+      swift: "swift",
+      kotlin: "kt",
+      sql: "sql",
+      html: "html",
+      css: "css",
+      json: "json",
+      yaml: "yml",
+      yml: "yml",
+      bash: "sh",
+      shell: "sh",
+      sh: "sh",
+      text: "txt",
+      txt: "txt",
+    };
+    const ext = extMap[lang] || "txt";
+    const firstLine = String(code || "").split("\n").find((l) => l.trim()) || "code";
+    const safeBase = firstLine
+      .toLowerCase()
+      .replace(/[^a-z0-9\s_-]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .slice(0, 5)
+      .join("_") || "code_block";
+    return `${safeBase}_${Date.now()}_${index}.${ext}`;
+  }
+
+  function inferCodeLanguageFromContent(code) {
+    const text = String(code || "");
+    const lower = text.toLowerCase();
+    if (/^\s*<(!doctype html|html|head|body|div|script|style)\b/m.test(lower)) return "html";
+    if (/\bimport\s+react\b|\buseeffect\b|\busestate\b|\bjsx\b/.test(lower)) return "jsx";
+    if (/\binterface\s+\w+|\btype\s+\w+\s*=|\bas\s+\w+/.test(lower)) return "ts";
+    if (/\bdef\s+\w+\(|\bfrom\s+\w+\s+import\b|\bimport\s+\w+/.test(lower)) return "py";
+    if (/\bpublic\s+class\b|\bsystem\.out\.println\b/.test(lower)) return "java";
+    if (/\bconsole\.log\b|\bfunction\s+\w+\(|\bconst\s+\w+\s*=/.test(lower)) return "js";
+    if (/\bselect\b[\s\S]*\bfrom\b/.test(lower)) return "sql";
+    if (/^\s*\{[\s\S]*\}\s*$/m && /"\w+"\s*:/.test(text)) return "json";
+    if (/^\s*[-\w]+\s*:\s*.+$/m && !/[{};]/.test(text)) return "yml";
+    if (/#include\s*<|int\s+main\s*\(/.test(text)) return "cpp";
+    if (/\bpackage\s+main\b|\bfunc\s+\w+\(/.test(lower)) return "go";
+    if (/\bfn\s+\w+\(|\blet\s+mut\b/.test(lower)) return "rs";
+    if (/\bbody\s*\{[\s\S]*\}/.test(lower) && /[.#][\w-]+\s*\{/.test(lower)) return "css";
+    return "txt";
+  }
+
+  function downloadInlineCodeFile(filename, code) {
+    const blob = new Blob([String(code || "")], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  }
+
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
     setIncognitoDraftSelected(false);
@@ -1326,28 +1529,56 @@ export default function App() {
   }
 
   function renderMessageContent(content) {
-    let processedContent = content;
+    const safeContent = String(content || "");
     const elements = [];
-    let currentIndex = 0;
-
-    const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+    const codeBlockRegex = /(```|~~~)\s*([^\n`]*)\r?\n([\s\S]*?)\r?\n?\1[ \t]*/g;
     let match;
     const codeBlocks = [];
     
-    while ((match = codeBlockRegex.exec(content)) !== null) {
+    while ((match = codeBlockRegex.exec(safeContent)) !== null) {
       codeBlocks.push({
         index: match.index,
         length: match[0].length,
-        language: match[1] || 'text',
-        code: match[2].trim(),
+        language: match[2] || 'text',
+        code: match[3].trim(),
         fullMatch: match[0]
       });
     }
 
     let lastIndex = 0;
+    const totalCodeLines = codeBlocks.reduce((sum, block) => {
+      const blockLines = block.code ? block.code.split(/\r?\n/).length : 0;
+      return sum + blockLines;
+    }, 0);
+    const collapseAllCodeBlocks = totalCodeLines > 100;
+    if (codeBlocks.length === 0) {
+      const plainLines = safeContent.split(/\r?\n/);
+      const nonEmpty = plainLines.filter((l) => l.trim().length > 0);
+      const codeLikeCount = nonEmpty.filter((l) => /[{}();=<>]|^\s*(const|let|var|function|class|if|for|while|import|export|def|return|public|private|static|async|await)\b/.test(l)).length;
+      if (nonEmpty.length > 100 && codeLikeCount >= Math.max(20, Math.ceil(nonEmpty.length * 0.2))) {
+        const suggestedFile = buildInlineCodeFilename("txt", safeContent, 0);
+        return (
+          <div className="pasted-code-inline-card">
+            <div className="pasted-code-inline-preview">{suggestedFile}</div>
+            <span className="pasted-code-tag">PASTED</span>
+            <button
+              type="button"
+              className="pasted-code-inline-download"
+              onClick={() => downloadInlineCodeFile(suggestedFile, safeContent)}
+            >
+              Download code file
+            </button>
+            <div className="pasted-code-inline-hint">
+              Code is over 100 lines. Reply with what to do next: explain, debug, refactor, optimize, test, or convert.
+            </div>
+          </div>
+        );
+      }
+    }
+
     codeBlocks.forEach((block, idx) => {
       if (block.index > lastIndex) {
-        const textSegment = content.substring(lastIndex, block.index);
+        const textSegment = safeContent.substring(lastIndex, block.index);
         elements.push(
           <span key={`text-${idx}`}>
             {renderTextWithFormatting(textSegment)}
@@ -1356,23 +1587,44 @@ export default function App() {
       }
 
       const copyKey = `code-${idx}-${block.index}`;
-      elements.push(
-        <div className="code-block" key={`code-${idx}`}>
-          <div className="code-header">
-            <span className="code-language">{block.language}</span>
-            <button className="copy-btn" onClick={() => handleCopy(block.code, copyKey)}>
-              {copiedCodeKey === copyKey ? "Copied" : "Copy"}
+      const blockLineCount = block.code ? block.code.split(/\r?\n/).length : 0;
+      if (collapseAllCodeBlocks || blockLineCount > 100) {
+        const suggestedFile = buildInlineCodeFilename(block.language, block.code, idx);
+        elements.push(
+          <div className="pasted-code-inline-card" key={`code-file-${idx}`}>
+            <div className="pasted-code-inline-preview">{suggestedFile}</div>
+            <span className="pasted-code-tag">PASTED</span>
+            <button
+              type="button"
+              className="pasted-code-inline-download"
+              onClick={() => downloadInlineCodeFile(suggestedFile, block.code)}
+            >
+              Download code file
             </button>
+            <div className="pasted-code-inline-hint">
+              Code is over 100 lines. Reply with what to do next: explain, debug, refactor, optimize, test, or convert.
+            </div>
           </div>
-          <pre><code>{block.code}</code></pre>
-        </div>
-      );
+        );
+      } else {
+        elements.push(
+          <div className="code-block" key={`code-${idx}`}>
+            <div className="code-header">
+              <span className="code-language">{block.language}</span>
+              <button className="copy-btn" onClick={() => handleCopy(block.code, copyKey)}>
+                {copiedCodeKey === copyKey ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <pre><code>{block.code}</code></pre>
+          </div>
+        );
+      }
 
       lastIndex = block.index + block.length;
     });
 
-    if (lastIndex < content.length) {
-      const textSegment = content.substring(lastIndex);
+    if (lastIndex < safeContent.length) {
+      const textSegment = safeContent.substring(lastIndex);
       elements.push(
         <span key={`text-final`}>
           {renderTextWithFormatting(textSegment)}
@@ -1380,7 +1632,12 @@ export default function App() {
       );
     }
 
-    return elements.length > 0 ? elements : renderTextWithFormatting(content);
+    return elements.length > 0 ? elements : renderTextWithFormatting(safeContent);
+  }
+
+  function isLikelyCodeFilename(filename) {
+    const name = String(filename || "").toLowerCase();
+    return /\.(js|jsx|ts|tsx|py|java|c|cpp|cs|go|rs|rb|php|swift|kt|sql|html|css|json|ya?ml|sh|txt)$/.test(name);
   }
 
   function renderTextWithFormatting(text) {
@@ -1427,7 +1684,7 @@ export default function App() {
       const line = lines[i];
       const trimmedLine = line.trim();
 
-      const bulletMatch = trimmedLine.match(/^[-*•]\s+(.+)$/);
+      const bulletMatch = trimmedLine.match(/^[-*]\s+(.+)$/);
       const numberedMatch = trimmedLine.match(/^\d+\.\s+(.+)$/);
 
       if (bulletMatch) {
@@ -1604,7 +1861,7 @@ export default function App() {
               </div>
               <h2>NexaCore AI</h2>
             </div>
-            <button className="new-chat-btn" onClick={handleNewChat}>
+            <button className="new-chat-btn" onClick={handleNewChat} title="New chat" aria-label="New chat">
               <span className="btn-icon">+</span>
               <span className="btn-text">New Chat</span>
             </button>
@@ -1656,7 +1913,7 @@ export default function App() {
                 className={`session-item ${session.id === selectedSessionId ? 'active' : ''}`}
                 onClick={() => handleSessionSelect(session.id)}
               >
-                <div className="session-icon">•</div>
+                <div className="session-icon" />
                 <span className="session-name">
                   {getSessionLabel(session)}
                   {pinnedSet.has(session.id) ? " (Pinned)" : ""}
@@ -1925,16 +2182,8 @@ export default function App() {
               </div>
             </div>
             <div className="floating-controls-right">
-              <button className="floating-pill floating-new-chat-btn" onClick={handleNewChat}>
-                New Chat
-              </button>
-              <button
-                className="floating-pill files-toggle-btn"
-                onClick={() => setFilesSidebarVisible(!filesSidebarVisible)}
-                disabled={!token}
-                title="Toggle Files"
-              >
-                Files
+              <button className="floating-pill floating-new-chat-btn" onClick={handleNewChat} title="New chat" aria-label="New chat">
+                +
               </button>
               {showFloatingSessionMenu && (
                 <div className="floating-chat-menu-wrap">
@@ -1967,7 +2216,7 @@ export default function App() {
                             Delete Chat
                           </button>
                         </>
-                      ) : (
+                      ) : !token ? (
                         <button
                           onClick={() => {
                             setIncognitoDraftSelected(true);
@@ -1977,7 +2226,8 @@ export default function App() {
                         >
                           Use Incognito Draft
                         </button>
-                      )}
+                      ) : null}
+                      
                     </div>
                   )}
                 </div>
@@ -2108,9 +2358,22 @@ export default function App() {
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="message-attachments">
                           {msg.attachments.map((att, idx) => (
-                            <div key={idx} className="attachment-badge">
-                              📎 {att.filename}
-                            </div>
+                            <button
+                              key={idx}
+                              type="button"
+                              className={`attachment-badge ${/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? "pasted-code-file-card" : ""}`}
+                              onClick={() => handleDownloadAttachment(att.id, att.filename)}
+                              title={`Download ${att.filename}`}
+                            >
+                              {/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? (
+                                <>
+                                  <div className="pasted-code-preview">{att.filename}</div>
+                                  <span className="pasted-code-tag">PASTED</span>
+                                </>
+                              ) : (
+                                <span>File {att.filename}</span>
+                              )}
+                            </button>
                           ))}
                         </div>
                       )}
@@ -2130,6 +2393,7 @@ export default function App() {
                       <div className="typing-dot"></div>
                       <div className="typing-dot"></div>
                     </div>
+                    <div className="typing-status-text">{activeProcessStatus}</div>
                   </div>
                 </div>
               )}
@@ -2178,13 +2442,36 @@ export default function App() {
                 <div className="attached-files-preview">
                   {attachedFiles.map((file, idx) => (
                     <div key={idx} className="attached-file-item">
-                      <span>📎 {file.name}</span>
-                      <button onClick={() => removeAttachedFile(idx)}>×</button>
+                      <span>File {file.name}</span>
+                      <button onClick={() => removeAttachedFile(idx)}>X</button>
                     </div>
                   ))}
                 </div>
               )}
-              <div className="input-wrapper">
+              <div className={`input-wrapper ${composerCodeDraft ? "with-code-draft" : ""}`}>
+                {composerCodeDraft && (
+                  <div className="composer-code-inline">
+                    <div className="composer-code-card-name">{composerCodeDraft.filename}</div>
+                    <div className="composer-code-card-meta">{composerCodeDraft.lines} lines detected</div>
+                    <div className="composer-code-card-actions">
+                      <span className="pasted-code-tag">PASTED</span>
+                      <button
+                        type="button"
+                        className="composer-code-download-btn"
+                        onClick={() => downloadInlineCodeFile(composerCodeDraft.filename, composerCodeDraft.content)}
+                      >
+                        Download
+                      </button>
+                      <button
+                        type="button"
+                        className="composer-code-clear-btn"
+                        onClick={() => setComposerCodeDraft(null)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="composer-tools" ref={composerToolsRef}>
                   <input
                     type="file"
@@ -2254,18 +2541,26 @@ export default function App() {
                   )}
                 </div>
                 <textarea
-                  placeholder="Ask anything"
+                  placeholder={composerCodeDraft ? "Reply..." : "Ask anything"}
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={handleComposerInputChange}
                   onKeyDown={handleKeyDown}
                   rows={1}
                 />
                 <button
-                  className="send-btn"
-                  onClick={handleSend}
-                  disabled={!loading && (!input.trim() && attachedFiles.length === 0)}
+                  className="files-inline-btn"
+                  onClick={() => setFilesSidebarVisible((prev) => !prev)}
+                  disabled={!token}
+                  title={token ? "Toggle Files" : "Login to view files"}
                 >
-                  {loading ? "Stop" : editingMessageId ? "Resend" : "↗"}
+                  Files
+                </button>
+                <button
+                  className="send-btn"
+                  onClick={() => handleSend(composerCodeDraft ? { codeDraft: composerCodeDraft } : undefined)}
+                  disabled={!loading && (!input.trim() && attachedFiles.length === 0 && !composerCodeDraft)}
+                >
+                  {loading ? "Stop" : editingMessageId ? "Resend" : "Send"}
                 </button>
               </div>
             </div>
@@ -2274,94 +2569,89 @@ export default function App() {
           {/* FILES SIDEBAR */}
           <aside className={`files-sidebar ${filesSidebarVisible ? 'visible' : 'hidden'}`}>
             <div className="files-sidebar-header">
-              <h2>📁 Files</h2>
+              <h2>Files</h2>
               <button 
                 className="close-files-btn"
                 onClick={() => setFilesSidebarVisible(false)}
                 title="Close"
               >
-                ×
+                X
               </button>
             </div>
 
             <div className="files-content">
-              {!selectedSessionId ? (
-                <div className="no-session-message">
-                  <p>Select a chat to view files</p>
-                </div>
-              ) : (
-                <>
-                  {/* Generated Files Section */}
-                  <div className="file-category">
-                    <h3 className="category-title">📊 Generated Files</h3>
-                    <div className="files-list">
-                      {sessionAttachments.filter(att => att.is_generated).length === 0 ? (
-                        <div className="empty-files">
-                          <p>No generated files yet</p>
-                          <small>Upload a CSV to generate analytics</small>
-                        </div>
-                      ) : (
-                        sessionAttachments
-                          .filter(att => att.is_generated)
-                          .map((attachment) => (
-                            <div key={attachment.id} className="file-item">
-                              <div className="file-icon-wrapper">
-                                {attachment.file_type === 'text/csv' ? '📊' : '📄'}
-                              </div>
-                              <div className="file-info-wrapper">
-                                <div className="file-name-text">{attachment.original_filename}</div>
-                                <div className="file-size-text">
-                                  {(attachment.file_size / 1024).toFixed(1)} KB
-                                </div>
-                              </div>
-                              <button
-                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
-                                className="file-download-btn"
-                                title="Download"
-                              >
-                                ⬇️
-                              </button>
-                            </div>
-                          ))
-                      )}
-                    </div>
-                  </div>
+              {(() => {
+                const source = selectedSessionId ? sessionAttachments : allUserAttachments;
+                const generated = source.filter((att) => att.is_generated);
+                const uploaded = source.filter((att) => !att.is_generated);
 
-                  {/* Uploaded Files Section */}
-                  <div className="file-category">
-                    <h3 className="category-title">📎 Uploaded Files</h3>
-                    <div className="files-list">
-                      {sessionAttachments.filter(att => !att.is_generated).length === 0 ? (
-                        <div className="empty-files">
-                          <p>No uploaded files</p>
-                          <small>Use the 📎 button to attach files</small>
-                        </div>
-                      ) : (
-                        sessionAttachments
-                          .filter(att => !att.is_generated)
-                          .map((attachment) => (
+                if (source.length === 0) {
+                  return (
+                    <div className="no-session-message">
+                      <p>No saved files yet</p>
+                      <small>Upload or generate files in any chat to keep them here</small>
+                    </div>
+                  );
+                }
+
+                return (
+                  <>
+                    <div className="file-category">
+                      <h3 className="category-title">Generated Files</h3>
+                      <div className="files-list">
+                        {generated.length === 0 ? (
+                          <div className="empty-files">
+                            <p>No generated files</p>
+                          </div>
+                        ) : (
+                          generated.map((attachment) => (
                             <div key={attachment.id} className="file-item">
-                              <div className="file-icon-wrapper">📎</div>
                               <div className="file-info-wrapper">
                                 <div className="file-name-text">{attachment.original_filename}</div>
-                                <div className="file-size-text">
-                                  {(attachment.file_size / 1024).toFixed(1)} KB
-                                </div>
+                                <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
                               </div>
                               <button
                                 onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
                                 className="file-download-btn"
                                 title="Download"
                               >
-                                ⬇️
+                                Download
                               </button>
                             </div>
                           ))
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </>
-              )}
+
+                    <div className="file-category">
+                      <h3 className="category-title">Uploaded Files</h3>
+                      <div className="files-list">
+                        {uploaded.length === 0 ? (
+                          <div className="empty-files">
+                            <p>No uploaded files</p>
+                          </div>
+                        ) : (
+                          uploaded.map((attachment) => (
+                            <div key={attachment.id} className="file-item">
+                              <div className="file-info-wrapper">
+                                <div className="file-name-text">{attachment.original_filename}</div>
+                                <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
+                              </div>
+                              <button
+                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
+                                className="file-download-btn"
+                                title="Download"
+                              >
+                                Download
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </aside>
 
@@ -2374,10 +2664,4 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
-
 
