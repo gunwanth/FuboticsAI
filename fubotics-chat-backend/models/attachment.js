@@ -40,6 +40,23 @@ const attachmentModel = {
   },
 
   /**
+   * Get all attachments belonging to a user across all sessions
+   * @param {number} userId
+   * @returns {Promise<Array>} Array of attachments
+   */
+  async getByUserId(userId) {
+    const result = await db.query(
+      `SELECT a.id, a.session_id, a.filename, a.original_filename, a.file_type, a.file_size, a.analysis_result, a.is_generated, a.created_at
+       FROM attachments a
+       JOIN chat_sessions cs ON cs.id = a.session_id
+       WHERE cs.user_id = $1
+       ORDER BY a.created_at DESC`,
+      [userId]
+    );
+    return result.rows;
+  },
+
+  /**
    * Get attachment file paths for cleanup operations.
    * @param {number} sessionId
    * @returns {Promise<Array>} Array with id and file_path
