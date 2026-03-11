@@ -16,6 +16,8 @@ const LANDING_TITLES = [
   "What should we work on first?",
   "What can I help you figure out?",
 ];
+const INTRO_TYPING_TEXT = "NexaCore";
+const INTRO_NOTE = "Starting secure chat, saved sessions, files, and research tools.";
 axios.defaults.withCredentials = true;
 
 // Axios interceptor setup for token refresh
@@ -158,6 +160,8 @@ export default function App() {
     }
   });
   const [landingTitle, setLandingTitle] = useState(LANDING_TITLES[0]);
+  const [showStartupIntro, setShowStartupIntro] = useState(true);
+  const [typedIntroText, setTypedIntroText] = useState("");
   const getSessionLabel = (session) => {
     if (session?.name) return session.name;
     if (Number.isInteger(session?.session_number)) return `Session ${session.session_number}`;
@@ -322,6 +326,27 @@ export default function App() {
     }, 1600);
     return () => clearInterval(timer);
   }, [isTyping, processSteps]);
+
+  useEffect(() => {
+    if (!showStartupIntro) return;
+    let charIndex = 0;
+    const typeTimer = window.setInterval(() => {
+      charIndex += 1;
+      setTypedIntroText(INTRO_TYPING_TEXT.slice(0, charIndex));
+      if (charIndex >= INTRO_TYPING_TEXT.length) {
+        window.clearInterval(typeTimer);
+      }
+    }, 85);
+
+    const dismissTimer = window.setTimeout(() => {
+      setShowStartupIntro(false);
+    }, 2600);
+
+    return () => {
+      window.clearInterval(typeTimer);
+      window.clearTimeout(dismissTimer);
+    };
+  }, [showStartupIntro]);
 
   function inferProcessSteps(text, options = {}) {
     const prompt = String(text || "").toLowerCase();
@@ -1848,6 +1873,24 @@ export default function App() {
         )
       )
     );
+
+  if (showStartupIntro) {
+    return (
+      <div className="startup-splash">
+        <div className="startup-intro" aria-hidden={!showStartupIntro}>
+          <div className="startup-intro-chip">
+            <span className="startup-intro-dot" />
+            Initializing
+          </div>
+          <div className="startup-intro-title">
+            {typedIntroText}
+            <span className="startup-intro-caret" />
+          </div>
+          <div className="startup-intro-note">{INTRO_NOTE}</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
