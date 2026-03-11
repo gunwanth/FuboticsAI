@@ -336,11 +336,11 @@ export default function App() {
       if (charIndex >= INTRO_TYPING_TEXT.length) {
         window.clearInterval(typeTimer);
       }
-    }, 85);
+    }, 150);
 
     const dismissTimer = window.setTimeout(() => {
       setShowStartupIntro(false);
-    }, 2600);
+    }, 3600);
 
     return () => {
       window.clearInterval(typeTimer);
