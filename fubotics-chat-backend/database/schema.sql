@@ -91,6 +91,44 @@ CREATE TABLE IF NOT EXISTS shared_chats (
   UNIQUE(session_id)
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  attachment_id INTEGER REFERENCES attachments(id) ON DELETE CASCADE,
+  source_type VARCHAR(50) NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  source_url TEXT,
+  status VARCHAR(30) NOT NULL DEFAULT 'ready',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (attachment_id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id SERIAL PRIMARY KEY,
+  source_id INTEGER NOT NULL REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  token_count INTEGER NOT NULL DEFAULT 0,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (source_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_jobs (
+  id SERIAL PRIMARY KEY,
+  source_id INTEGER REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+  job_type VARCHAR(50) NOT NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'queued',
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
@@ -121,6 +159,21 @@ CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachm
 CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment_id ON message_attachments(attachment_id);
 CREATE INDEX IF NOT EXISTS idx_shared_chats_token ON shared_chats(token);
 CREATE INDEX IF NOT EXISTS idx_shared_chats_session_id ON shared_chats(session_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_user_id ON knowledge_sources(user_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_session_id ON knowledge_sources(session_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_attachment_id ON knowledge_sources(attachment_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_sources_status ON knowledge_sources(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_sources_web_unique
+ON knowledge_sources(user_id, session_id, source_type, source_url)
+WHERE source_url IS NOT NULL AND source_type = 'web';
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source_id ON knowledge_chunks(source_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_user_id ON knowledge_chunks(user_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_session_id ON knowledge_chunks(session_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_created_at ON knowledge_chunks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_search ON knowledge_chunks
+USING GIN (to_tsvector('simple', content));
+CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_source_id ON knowledge_jobs(source_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_status ON knowledge_jobs(status);
 
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -168,6 +221,36 @@ BEGIN
   ) THEN
     CREATE TRIGGER update_users_updated_at
       BEFORE UPDATE ON users
+      FOR EACH ROW
+      EXECUTE FUNCTION update_updated_at_column();
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'update_knowledge_sources_updated_at'
+      AND tgrelid = 'knowledge_sources'::regclass
+  ) THEN
+    CREATE TRIGGER update_knowledge_sources_updated_at
+      BEFORE UPDATE ON knowledge_sources
+      FOR EACH ROW
+      EXECUTE FUNCTION update_updated_at_column();
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'update_knowledge_jobs_updated_at'
+      AND tgrelid = 'knowledge_jobs'::regclass
+  ) THEN
+    CREATE TRIGGER update_knowledge_jobs_updated_at
+      BEFORE UPDATE ON knowledge_jobs
       FOR EACH ROW
       EXECUTE FUNCTION update_updated_at_column();
   END IF;

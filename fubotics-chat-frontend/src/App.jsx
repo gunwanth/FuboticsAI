@@ -998,6 +998,41 @@ export default function App() {
     setShowAuthScreen(true);
   }
 
+  function safeParseAnalysis(value) {
+    if (!value) return null;
+    if (typeof value === "object") return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  function summarizeAttachmentAnalysis(analysis) {
+    const parsed = safeParseAnalysis(analysis);
+    if (!parsed) return "";
+    const parts = [];
+    if (parsed.subject) parts.push(parsed.subject);
+    if (parsed.likely_type && parsed.likely_type !== parsed.subject) parts.push(parsed.likely_type);
+    if (parsed.background) parts.push(`Background: ${parsed.background}`);
+    if (Array.isArray(parsed.dominant_colors) && parsed.dominant_colors.length > 0) {
+      parts.push(`Colors: ${parsed.dominant_colors.slice(0, 3).join(", ")}`);
+    }
+    if (parsed.visible_text) parts.push(`Text: ${parsed.visible_text}`);
+    if (parsed.summary) parts.push(parsed.summary);
+    return parts.join(" | ");
+  }
+
+  function isImageAttachmentLike(fileType, filename) {
+    const lowerName = String(filename || "").toLowerCase();
+    return (
+      String(fileType || "").startsWith("image/") ||
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg")
+    );
+  }
+
   // Handle file attachment selection
   async function handleFileAttachment(event) {
     const files = Array.from(event.target.files);
@@ -1023,12 +1058,64 @@ export default function App() {
     try {
       const response = await axios.post(`${API_BASE}/api/attachments`, formData);
 
-      setAttachedFiles(prev => [...prev, ...files.map((f, idx) => ({
-        name: f.name,
-        id: response.data.attachmentIds[idx]
-      }))]);
+      const returnedAttachments = Array.isArray(response.data?.attachments) ? response.data.attachments : [];
+      const nextAttachedFiles = files.map((f, idx) => {
+        const attachment = returnedAttachments[idx] || {};
+        return {
+          name: f.name,
+          id: response.data.attachmentIds[idx],
+          fileType: attachment.file_type || f.type,
+          analysisResult: attachment.analysis_result || null,
+        };
+      });
+      setAttachedFiles(prev => [
+        ...prev,
+        ...nextAttachedFiles,
+      ]);
 
       setPendingAttachmentIds(prev => [...prev, ...response.data.attachmentIds]);
+
+      const needsVisionRefresh = nextAttachedFiles.filter(
+        (file) => file.id && isImageAttachmentLike(file.fileType, file.name) && !file.analysisResult
+      );
+      if (needsVisionRefresh.length > 0) {
+        Promise.allSettled(
+          needsVisionRefresh.map((file) =>
+            axios.post(`${API_BASE}/api/attachments/${file.id}/vision-analyze`)
+          )
+        ).then(async (results) => {
+          const refreshedById = new Map();
+          results.forEach((result) => {
+            const attachment = result.status === "fulfilled" ? result.value?.data?.attachment : null;
+            if (attachment?.id) refreshedById.set(attachment.id, attachment);
+          });
+          if (refreshedById.size > 0) {
+            setAttachedFiles((prev) =>
+              prev.map((file) => {
+                const refreshed = refreshedById.get(file.id);
+                return refreshed
+                  ? {
+                      ...file,
+                      fileType: refreshed.file_type || file.fileType,
+                      analysisResult: refreshed.analysis_result || file.analysisResult,
+                    }
+                  : file;
+              })
+            );
+            if (targetSessionId) {
+              try {
+                const attRes = await axios.get(`${API_BASE}/api/attachments`, {
+                  params: { sessionId: targetSessionId },
+                });
+                setSessionAttachments(attRes.data.attachments || []);
+              } catch (_) {
+                // Ignore background refresh failure.
+              }
+            }
+            fetchAllUserAttachments();
+          }
+        });
+      }
 
       const csvFiles = files.filter((f) =>
         f.type === "text/csv" || String(f.name || "").toLowerCase().endsWith(".csv")
@@ -2485,7 +2572,14 @@ export default function App() {
                 <div className="attached-files-preview">
                   {attachedFiles.map((file, idx) => (
                     <div key={idx} className="attached-file-item">
-                      <span>File {file.name}</span>
+                      <div className="attached-file-copy">
+                        <span>{file.name}</span>
+                        {file.analysisResult && (
+                          <small className="attached-file-summary">
+                            {summarizeAttachmentAnalysis(file.analysisResult)}
+                          </small>
+                        )}
+                      </div>
                       <button onClick={() => removeAttachedFile(idx)}>X</button>
                     </div>
                   ))}
@@ -2652,6 +2746,11 @@ export default function App() {
                               <div className="file-info-wrapper">
                                 <div className="file-name-text">{attachment.original_filename}</div>
                                 <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
+                                {attachment.analysis_result && (
+                                  <div className="file-analysis-text">
+                                    {summarizeAttachmentAnalysis(attachment.analysis_result)}
+                                  </div>
+                                )}
                               </div>
                               <button
                                 onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
@@ -2679,6 +2778,11 @@ export default function App() {
                               <div className="file-info-wrapper">
                                 <div className="file-name-text">{attachment.original_filename}</div>
                                 <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
+                                {attachment.analysis_result && (
+                                  <div className="file-analysis-text">
+                                    {summarizeAttachmentAnalysis(attachment.analysis_result)}
+                                  </div>
+                                )}
                               </div>
                               <button
                                 onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}

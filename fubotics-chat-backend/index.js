@@ -26,6 +26,8 @@ const chatSessionModel = require("./models/chatSession");
 const messageModel = require("./models/message");
 const attachmentModel = require("./models/attachment");
 const shareChatModel = require("./models/shareChat");
+const { buildRagContext, indexAttachmentForRag, indexWebSourcesForRag } = require("./services/ragService");
+const { createImageGenerationService } = require("./services/imageGenerationService");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -228,6 +230,15 @@ async function analyzeFile(filePath, fileType, originalFilename) {
         sample: rows.slice(0, 10),
         extracted_text: sheetText
       });
+    } else if (
+      fileType === "image/png" ||
+      fileType === "image/jpeg" ||
+      fileType === "image/jpg" ||
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg")
+    ) {
+      return await analyzeImageWithVision(filePath, fileType, originalFilename);
     }
     
     return JSON.stringify({ type: 'file', filename: originalFilename });
@@ -249,6 +260,7 @@ const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
 const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
 const sambaNovaChatModel = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
 const sambaNovaPromptModel = process.env.SAMBANOVA_IMAGE_PROMPT_MODEL || "Meta-Llama-3.3-70B-Instruct";
+const sambaNovaVisionModel = process.env.SAMBANOVA_VISION_MODEL || "Llama-4-Maverick-17B-128E-Instruct";
 const freepikEnabled = String(process.env.ENABLE_FREEPIK || "false").toLowerCase() === "true";
 const freepikApiKey = freepikEnabled ? process.env.FREEPIK_API_KEY || null : null;
 const freepikImageModel = process.env.FREEPIK_IMAGE_MODEL || "flux-pro-v1-1";
@@ -264,6 +276,13 @@ const huggingFaceApiKey = process.env.HUGGINGFACE_API_KEY || process.env.HF_API_
 const huggingFaceImageModel = process.env.HF_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
 const pollinationsBaseUrl = (process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai").replace(/\/$/, "");
 const pollinationsImageModel = process.env.POLLINATIONS_IMAGE_MODEL || "flux";
+const localImageWorkerUrl = (process.env.LOCAL_IMAGE_WORKER_URL || "").trim();
+const localImageWorkerApiKey = process.env.LOCAL_IMAGE_WORKER_API_KEY || null;
+const localImageWorkerTimeoutMs = Math.min(
+  300000,
+  Math.max(30000, Number.parseInt(process.env.LOCAL_IMAGE_WORKER_TIMEOUT_MS || "180000", 10))
+);
+const allowPlaceholderFallback = String(process.env.ALLOW_IMAGE_PLACEHOLDER_FALLBACK || "false").toLowerCase() === "true";
 const extractionMaxChars = Math.min(
   120000,
   Math.max(4000, Number.parseInt(process.env.EXTRACTION_MAX_CHARS || "30000", 10))
@@ -362,6 +381,31 @@ function createFallbackPng(prompt = "") {
   const idat = zlib.deflateSync(raw, { level: 9 });
   return Buffer.concat([signature, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
+
+const imageGenerationService = createImageGenerationService({
+  axios,
+  fs,
+  path,
+  attachmentModel,
+  generatedDir,
+  buildGeneratedFilename,
+  createFallbackPng,
+  sambaNovaApiKey,
+  sambaNovaBaseUrl,
+  sambaNovaPromptModel,
+  freepikApiKey,
+  freepikImageModel,
+  freepikPollAttempts,
+  freepikPollIntervalMs,
+  huggingFaceApiKey,
+  huggingFaceImageModel,
+  pollinationsBaseUrl,
+  pollinationsImageModel,
+  localImageWorkerUrl,
+  localImageWorkerApiKey,
+  localImageWorkerTimeoutMs,
+  allowPlaceholderFallback,
+});
 const deepSearchMaxResults = Math.min(
   12,
   Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_MAX_RESULTS || "6", 10))
@@ -390,6 +434,82 @@ const aiDeepSearchMaxTokens = Math.min(
   4096,
   Math.max(aiDefaultMaxTokens, Number.parseInt(process.env.AI_DEEP_SEARCH_MAX_TOKENS || "3072", 10))
 );
+
+function stripCodeFence(value) {
+  const text = String(value || "").trim();
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? fenced[1].trim() : text;
+}
+
+async function analyzeImageWithVision(filePath, fileType, originalFilename) {
+  if (!sambaNovaApiKey) {
+    return JSON.stringify({
+      type: "image",
+      filename: originalFilename,
+      summary: "Image uploaded. Vision analysis unavailable because SAMBANOVA_API_KEY is not configured.",
+      extracted_text: `Image file ${originalFilename}. Vision analysis unavailable.`,
+    });
+  }
+
+  const mimeType = fileType || "image/png";
+  const imageBase64 = fs.readFileSync(filePath).toString("base64");
+  const prompt = [
+    "Analyze this image and return only valid JSON.",
+    "Required keys: type, subject, likely_type, dominant_colors, background, visible_text, summary, extracted_text.",
+    "Use short values and keep extracted_text retrieval-friendly.",
+  ].join("\n");
+
+  const response = await axios.post(
+    `${sambaNovaBaseUrl}/chat/completions`,
+    {
+      model: sambaNovaVisionModel,
+      max_tokens: 700,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+    },
+    {
+      timeout: 45000,
+      headers: {
+        Authorization: `Bearer ${sambaNovaApiKey}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  const rawContent = response.data?.choices?.[0]?.message?.content || "";
+  const cleaned = stripCodeFence(rawContent);
+  try {
+    const parsed = JSON.parse(cleaned);
+    parsed.type = "image";
+    if (!parsed.extracted_text) {
+      parsed.extracted_text = [
+        parsed.subject ? `Subject: ${parsed.subject}` : "",
+        parsed.likely_type ? `Type: ${parsed.likely_type}` : "",
+        Array.isArray(parsed.dominant_colors) && parsed.dominant_colors.length
+          ? `Colors: ${parsed.dominant_colors.join(", ")}`
+          : "",
+        parsed.background ? `Background: ${parsed.background}` : "",
+        parsed.visible_text ? `Visible text: ${parsed.visible_text}` : "",
+      ].filter(Boolean).join(". ");
+    }
+    return JSON.stringify(parsed);
+  } catch (_) {
+    return JSON.stringify({
+      type: "image",
+      filename: originalFilename,
+      summary: cleaned.slice(0, 1000),
+      extracted_text: cleaned.slice(0, extractionMaxChars),
+    });
+  }
+}
 
 function buildHistoryContext(history = [], maxMessages = 24) {
   const recent = Array.isArray(history) ? history.slice(-maxMessages) : [];
@@ -547,6 +667,17 @@ async function ensureSequentialSessionName(userId, proposedName) {
 function renderAttachmentInsight(analysis) {
   if (!analysis || typeof analysis !== "object") return "";
   const richText = String(analysis.extracted_text || analysis.preview || "").substring(0, 6000);
+  if (analysis.type === "image") {
+    const colors = Array.isArray(analysis.dominant_colors) ? analysis.dominant_colors.join(", ") : "";
+    return [
+      analysis.subject ? `Image subject: ${analysis.subject}.` : "",
+      analysis.likely_type ? `Likely type: ${analysis.likely_type}.` : "",
+      colors ? `Dominant colors: ${colors}.` : "",
+      analysis.background ? `Background: ${analysis.background}.` : "",
+      analysis.visible_text ? `Visible text: ${analysis.visible_text}.` : "",
+      richText ? `Visual extraction: ${richText}` : "",
+    ].filter(Boolean).join(" ");
+  }
   if (analysis.type === "csv") {
     return `CSV with ${analysis.rows || 0} rows and columns: ${(analysis.columns || []).join(", ")}. Extracted content: ${richText}`;
   }
@@ -925,252 +1056,8 @@ async function generateNotesFile(sessionId, prompt, contextText = "") {
   );
 }
 
-async function buildImagePromptWithSamba(userPrompt) {
-  if (!sambaNovaApiKey) {
-    return userPrompt;
-  }
-  try {
-    const resp = await axios.post(
-      `${sambaNovaBaseUrl}/chat/completions`,
-      {
-        model: sambaNovaPromptModel,
-        temperature: 0.4,
-        max_tokens: 500,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert prompt engineer for text-to-image models. Return one detailed visual prompt only.",
-          },
-          {
-            role: "user",
-            content: `Create a production-grade text-to-image prompt for: ${userPrompt}`,
-          },
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${sambaNovaApiKey}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 60000,
-      }
-    );
-    return resp.data?.choices?.[0]?.message?.content?.trim() || userPrompt;
-  } catch (err) {
-    console.error("SambaNova prompt generation failed, using raw prompt:", err.message);
-    return userPrompt;
-  }
-}
-
 async function generateImageFile(sessionId, prompt) {
-  let imageBuffer = null;
-  let imageMime = "image/png";
-  const promptForGenerator = await buildImagePromptWithSamba(prompt);
-
-  async function generateImageWithFreepik(textPrompt) {
-    const baseUrl =
-      freepikImageModel === "mystic"
-        ? "https://api.freepik.com/v1/ai/mystic"
-        : `https://api.freepik.com/v1/ai/text-to-image/${encodeURIComponent(freepikImageModel)}`;
-    const createRes = await axios.post(
-      baseUrl,
-      {
-        prompt: textPrompt,
-        aspect_ratio: "square_1_1",
-        output_format: "png",
-      },
-      {
-        headers: {
-          "x-freepik-api-key": freepikApiKey,
-          "Content-Type": "application/json",
-        },
-        timeout: 60000,
-        validateStatus: () => true,
-      }
-    );
-
-    if (createRes.status >= 400) {
-      throw new Error(`Freepik create task failed (${createRes.status}): ${JSON.stringify(createRes.data).slice(0, 260)}`);
-    }
-
-    const taskId = createRes.data?.data?.task_id;
-    if (!taskId) {
-      throw new Error("Freepik did not return task_id");
-    }
-
-    for (let i = 0; i < freepikPollAttempts; i++) {
-      const pollRes = await axios.get(`${baseUrl}/${taskId}`, {
-        headers: {
-          "x-freepik-api-key": freepikApiKey,
-        },
-        timeout: 45000,
-        validateStatus: () => true,
-      });
-
-      if (pollRes.status >= 400) {
-        throw new Error(`Freepik poll failed (${pollRes.status}): ${JSON.stringify(pollRes.data).slice(0, 260)}`);
-      }
-
-      const payload = pollRes.data?.data || {};
-      const generated = Array.isArray(payload.generated) ? payload.generated : [];
-      if (generated.length > 0 && generated[0]) {
-        const imageUrl = generated[0];
-        const imageRes = await axios.get(imageUrl, {
-          responseType: "arraybuffer",
-          timeout: 60000,
-          validateStatus: () => true,
-        });
-        if (imageRes.status >= 400) {
-          throw new Error(`Freepik image download failed (${imageRes.status})`);
-        }
-        const contentType = imageRes.headers["content-type"] || "image/png";
-        return { buffer: Buffer.from(imageRes.data), mime: contentType };
-      }
-
-      const status = String(payload.status || "").toUpperCase();
-      if (status === "FAILED" || status === "REJECTED" || status === "CANCELLED") {
-        throw new Error(`Freepik task ended with status ${status}`);
-      }
-
-      await new Promise((r) => setTimeout(r, freepikPollIntervalMs));
-    }
-
-    throw new Error("Freepik task timed out");
-  }
-
-  if (!imageBuffer && freepikApiKey) {
-    try {
-      const freepikImage = await generateImageWithFreepik(promptForGenerator);
-      imageBuffer = freepikImage.buffer;
-      imageMime = freepikImage.mime;
-      console.warn("Image generation used Freepik provider.");
-    } catch (err) {
-      console.error("Freepik image generation failed:", err.message);
-    }
-  }
-
-  if (!imageBuffer && huggingFaceApiKey) {
-    let lastError = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        const hfRes = await axios.post(
-          `https://router.huggingface.co/hf-inference/models/${encodeURIComponent(huggingFaceImageModel)}`,
-          { inputs: promptForGenerator },
-          {
-            headers: {
-              Authorization: `Bearer ${huggingFaceApiKey}`,
-              "Content-Type": "application/json",
-              Accept: "image/png",
-            },
-            responseType: "arraybuffer",
-            timeout: 90000,
-            validateStatus: () => true,
-          }
-        );
-
-        const contentType = hfRes.headers["content-type"] || "";
-        if (contentType.startsWith("image/")) {
-          imageBuffer = Buffer.from(hfRes.data);
-          imageMime = contentType;
-          break;
-        }
-
-        const bodyText = Buffer.from(hfRes.data).toString("utf8");
-        let payload = {};
-        try {
-          payload = JSON.parse(bodyText);
-        } catch (_) {
-          payload = { error: bodyText.substring(0, 300) };
-        }
-
-        if (payload?.estimated_time) {
-          await new Promise((r) => setTimeout(r, Math.ceil(payload.estimated_time * 1000)));
-          continue;
-        }
-        throw new Error(
-          payload?.error ||
-            payload?.message ||
-            `Hugging Face request failed with status ${hfRes.status}`
-        );
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    if (!imageBuffer && lastError) {
-      console.error("Hugging Face image generation failed:", lastError.message);
-    }
-  }
-
-  if (!imageBuffer && pollinationsBaseUrl) {
-    try {
-      const pollinationsUrl = `${pollinationsBaseUrl}/prompt/${encodeURIComponent(promptForGenerator)}?model=${encodeURIComponent(pollinationsImageModel)}&width=1024&height=1024&nologo=true`;
-      const pollinationsRes = await axios.get(pollinationsUrl, {
-        responseType: "arraybuffer",
-        timeout: 90000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        },
-      });
-      imageBuffer = Buffer.from(pollinationsRes.data);
-      imageMime = pollinationsRes.headers["content-type"] || "image/png";
-      console.warn("Image generation used Pollinations fallback provider.");
-    } catch (err) {
-      console.error("Pollinations fallback failed:", err.message);
-    }
-  }
-
-  if (!imageBuffer) {
-    const query = encodeURIComponent((prompt || "art image").slice(0, 180));
-    const webImageCandidates = [
-      `https://source.unsplash.com/1024x1024/?${query}`,
-      `https://loremflickr.com/1024/1024/${query}`,
-    ];
-    for (const candidate of webImageCandidates) {
-      try {
-        const webRes = await axios.get(candidate, {
-          responseType: "arraybuffer",
-          timeout: 45000,
-          maxRedirects: 5,
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-          validateStatus: () => true,
-        });
-        const ct = (webRes.headers["content-type"] || "").toLowerCase();
-        if (ct.startsWith("image/")) {
-          imageBuffer = Buffer.from(webRes.data);
-          imageMime = ct;
-          console.warn(`Image generation used web-scraped fallback: ${candidate}`);
-          break;
-        }
-      } catch (err) {
-        console.error(`Web image fallback failed for ${candidate}:`, err.message);
-      }
-    }
-  }
-
-  if (!imageBuffer) {
-    imageBuffer = createFallbackPng(prompt);
-    imageMime = "image/png";
-    console.warn("All remote image providers failed. Served local PNG fallback image.");
-  }
-  const ext = imageMime.includes("jpeg")
-    ? "jpg"
-    : imageMime.includes("webp")
-    ? "webp"
-    : "png";
-  const filename = buildGeneratedFilename(prompt, "image", ext);
-  const filePath = path.join(generatedDir, filename);
-  fs.writeFileSync(filePath, imageBuffer);
-  return attachmentModel.create(
-    sessionId,
-    filename,
-    filename,
-    filePath,
-    imageMime,
-    fs.statSync(filePath).size,
-    JSON.stringify({ type: "generated_image", prompt }),
-    true
-  );
+  return imageGenerationService.generateImageFile(sessionId, prompt);
 }
 
 function detectGenerationRequest(content) {
@@ -1267,6 +1154,9 @@ async function getAIReply(
         }
       }
       systemContent += "\n\nWhen users ask about these files, reference the information provided above.";
+      systemContent += "\nIf an uploaded file is an image, its visual analysis has already been performed by the system.";
+      systemContent += "\nDo not say you cannot view, inspect, or analyze the image.";
+      systemContent += "\nUse the provided image subject, likely type, colors, background, visible text, and extracted visual summary as the authoritative visual evidence.";
     }
 
     if (webSources.length > 0) {
@@ -1516,15 +1406,33 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
     } else {
       const history = await messageModel.getBySessionId(parsedSessionId);
       const sources = deepSearch ? await deepSearchWeb(content) : [];
+      if (sources.length > 0) {
+        try {
+          await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
+        } catch (err) {
+          console.error("Web RAG indexing failed:", err?.message || err);
+        }
+      }
       const crossChatContext = shouldReviewAcrossChats(content)
         ? await getCrossChatContext(req.user.id, parsedSessionId)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model, !!thinking);
+      const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch || thinking ? 8 : 6);
+      const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
       if (sources.length > 0) {
         const links = sources
           .map((s) => `- [${s.title}](${s.url})`)
           .join("\n");
         aiReply += `\n\nSources:\n${links}`;
+      }
+      if (ragContextResult.citations.length > 0) {
+        const ragLinks = ragContextResult.citations
+          .map((item) => {
+            const title = item.sourceUrl ? `[${item.title}](${item.sourceUrl})` : item.title;
+            return `- [RAG ${item.ref}] ${title} (${item.sourceType}, chunk ${item.chunkIndex + 1})`;
+          })
+          .join("\n");
+        aiReply += `\n\nKnowledge Base References:\n${ragLinks}`;
       }
       const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
       const assistantRecord = await messageModel.create(parsedSessionId, "assistant", codeExport.content);
@@ -1815,13 +1723,36 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
     } else {
       const history = await messageModel.getBySessionId(targetMessage.session_id);
       const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
+      if (sources.length > 0) {
+        try {
+          await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
+        } catch (err) {
+          console.error("Web RAG indexing failed during edit:", err?.message || err);
+        }
+      }
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
         ? await getCrossChatContext(req.user.id, targetMessage.session_id)
         : "";
-      let aiReply = await getAIReply(history, sessionAttachments, sources, crossChatContext, model, !!thinking);
+      const ragContextResult = await buildRagContext(
+        req.user.id,
+        targetMessage.session_id,
+        normalizedContent,
+        deepSearch || thinking ? 8 : 6
+      );
+      const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;
+      }
+      if (ragContextResult.citations.length > 0) {
+        const ragLinks = ragContextResult.citations
+          .map((item) => {
+            const title = item.sourceUrl ? `[${item.title}](${item.sourceUrl})` : item.title;
+            return `- [RAG ${item.ref}] ${title} (${item.sourceType}, chunk ${item.chunkIndex + 1})`;
+          })
+          .join("\n");
+        aiReply += `\n\nKnowledge Base References:\n${ragLinks}`;
       }
       const codeExport = await offloadLargeCodeBlocksToFiles(targetMessage.session_id, normalizedContent, aiReply, 100);
       const assistantRecord = await messageModel.create(targetMessage.session_id, "assistant", codeExport.content);
@@ -1921,6 +1852,7 @@ app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), asyn
     }
 
     const attachmentIds = [];
+    const attachments = [];
     
     for (const file of req.files) {
       const analysisResult = await analyzeFile(file.path, file.mimetype, file.originalname);
@@ -1933,12 +1865,15 @@ app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), asyn
         file.size,
         analysisResult
       );
+      await indexAttachmentForRag(req.user.id, parseInt(sessionId, 10), attachment);
       attachmentIds.push(attachment.id);
+      attachments.push(attachment);
     }
 
     res.json({ 
       success: true, 
       attachmentIds,
+      attachments,
       message: `${req.files.length} file(s) uploaded successfully`
     });
   } catch (err) {
@@ -1972,6 +1907,56 @@ app.get("/api/attachments/all", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("GET /api/attachments/all error:", err);
     res.status(500).json({ error: "Failed to fetch user attachments" });
+  }
+});
+
+app.post("/api/attachments/:id/vision-analyze", authMiddleware, async (req, res) => {
+  try {
+    const attachmentId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(attachmentId)) {
+      return res.status(400).json({ error: "Invalid attachment id" });
+    }
+
+    const attachment = await attachmentModel.getById(attachmentId);
+    if (!attachment) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+
+    const session = await chatSessionModel.getById(attachment.session_id, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to access this attachment" });
+    }
+
+    const lowerName = String(attachment.original_filename || attachment.filename || "").toLowerCase();
+    const isImage =
+      String(attachment.file_type || "").startsWith("image/") ||
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg");
+
+    if (!isImage) {
+      return res.status(400).json({ error: "Vision analysis is supported only for image attachments" });
+    }
+
+    const filePath = resolveAttachmentDiskPath(attachment);
+    if (!filePath) {
+      return res.status(404).json({ error: "Stored attachment file is not available in this runtime" });
+    }
+
+    const analysisResult = await analyzeImageWithVision(filePath, attachment.file_type, attachment.original_filename);
+    const updatedAttachment = await attachmentModel.updateAnalysisResult(attachmentId, analysisResult);
+    if (!updatedAttachment) {
+      return res.status(500).json({ error: "Failed to update attachment analysis" });
+    }
+
+    await indexAttachmentForRag(req.user.id, updatedAttachment.session_id, updatedAttachment);
+    res.json({
+      success: true,
+      attachment: updatedAttachment,
+    });
+  } catch (err) {
+    console.error("POST /api/attachments/:id/vision-analyze error:", err);
+    res.status(500).json({ error: "Failed to analyze image attachment" });
   }
 });
 

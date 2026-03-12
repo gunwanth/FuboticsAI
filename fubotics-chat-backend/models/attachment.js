@@ -17,7 +17,7 @@ const attachmentModel = {
     const result = await db.query(
       `INSERT INTO attachments (session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-       RETURNING id, session_id, filename, original_filename, file_type, file_size, is_generated, created_at`,
+       RETURNING id, session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated, created_at`,
       [sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult, isGenerated]
     );
     return result.rows[0];
@@ -81,6 +81,23 @@ const attachmentModel = {
       `SELECT id, session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated, created_at
        FROM attachments WHERE id = $1`,
       [attachmentId]
+    );
+    return result.rows[0] || null;
+  },
+
+  /**
+   * Update attachment analysis result.
+   * @param {number} attachmentId
+   * @param {string} analysisResult
+   * @returns {Promise<Object|null>} Updated attachment or null
+   */
+  async updateAnalysisResult(attachmentId, analysisResult) {
+    const result = await db.query(
+      `UPDATE attachments
+       SET analysis_result = $2
+       WHERE id = $1
+       RETURNING id, session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated, created_at`,
+      [attachmentId, analysisResult]
     );
     return result.rows[0] || null;
   },
