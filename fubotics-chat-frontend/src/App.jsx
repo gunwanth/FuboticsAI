@@ -120,6 +120,10 @@ export default function App() {
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
   const [allUserAttachments, setAllUserAttachments] = useState([]);
+  const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState({});
+  const [imagePreview, setImagePreview] = useState(null);
+  const attachmentPreviewUrlsRef = useRef({});
+  const imagePreviewRef = useRef(null);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
   const [openFloatingChatMenu, setOpenFloatingChatMenu] = useState(false);
@@ -387,6 +391,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    attachmentPreviewUrlsRef.current = attachmentPreviewUrls;
+  }, [attachmentPreviewUrls]);
+
+  useEffect(() => {
+    imagePreviewRef.current = imagePreview;
+  }, [imagePreview]);
+
+  useEffect(() => {
     return () => {
       if (copyResetTimerRef.current) {
         clearTimeout(copyResetTimerRef.current);
@@ -395,8 +407,66 @@ export default function App() {
         activeRequestControllerRef.current.abort();
         activeRequestControllerRef.current = null;
       }
+      Object.values(attachmentPreviewUrlsRef.current || {}).forEach((url) => {
+        if (url) URL.revokeObjectURL(url);
+      });
+      const preview = imagePreviewRef.current;
+      if (preview?.revokeOnClose && preview.src) {
+        URL.revokeObjectURL(preview.src);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    const attachments = [];
+    messages.forEach((msg) => {
+      (msg.attachments || []).forEach((att) => attachments.push(att));
+    });
+    sessionAttachments.forEach((att) => attachments.push(att));
+    allUserAttachments.forEach((att) => attachments.push(att));
+
+    const uniqueImageAttachments = attachments.filter(
+      (att, index, arr) =>
+        att?.id &&
+        isImageAttachmentLike(att.file_type, att.filename || att.original_filename) &&
+        arr.findIndex((item) => item?.id === att.id) === index
+    );
+    const missing = uniqueImageAttachments.filter((att) => !attachmentPreviewUrls[att.id]);
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    Promise.allSettled(
+      missing.map(async (att) => {
+        const response = await axios.get(`${API_BASE}/api/download-attachment/${att.id}`, {
+          responseType: "blob",
+        });
+        return { id: att.id, url: URL.createObjectURL(response.data) };
+      })
+    ).then((results) => {
+      if (cancelled) {
+        results.forEach((result) => {
+          if (result.status === "fulfilled" && result.value?.url) {
+            URL.revokeObjectURL(result.value.url);
+          }
+        });
+        return;
+      }
+      setAttachmentPreviewUrls((prev) => {
+        const next = { ...prev };
+        results.forEach((result) => {
+          if (result.status === "fulfilled" && result.value?.id && result.value?.url) {
+            next[result.value.id] = result.value.url;
+          }
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, messages, sessionAttachments, allUserAttachments, attachmentPreviewUrls]);
 
   useEffect(() => {
     if (token) {
@@ -725,8 +795,7 @@ export default function App() {
       setMessages([]);
       setSelectedSessionId(null);
       setSessionAttachments([]);
-      setAttachedFiles([]);
-      setPendingAttachmentIds([]);
+      clearAttachedFilesState();
     } catch (err) {
       console.error("Delete account error", err);
       alert(err.response?.data?.error || "Failed to delete account");
@@ -795,8 +864,7 @@ export default function App() {
     rotateLandingTitle();
     setSelectedSessionId(null);
     setMessages([]);
-    setAttachedFiles([]);
-    setPendingAttachmentIds([]);
+    clearAttachedFilesState();
     setComposerCodeDraft(null);
     setInput("");
     setEditingMessageId(null);
@@ -828,8 +896,7 @@ export default function App() {
     setIncognitoDraftSelected(false);
     setIncognitoMessages([]);
     setMessages([]);
-    setAttachedFiles([]);
-    setPendingAttachmentIds([]);
+    clearAttachedFilesState();
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
     }
@@ -861,8 +928,7 @@ export default function App() {
           nextUrl.searchParams.delete("session");
           window.history.replaceState({}, "", nextUrl.toString());
         }
-        setAttachedFiles([]);
-        setPendingAttachmentIds([]);
+        clearAttachedFilesState();
       }
       await fetchAllUserAttachments();
     } catch (err) {
@@ -1033,10 +1099,141 @@ export default function App() {
     );
   }
 
-  // Handle file attachment selection
-  async function handleFileAttachment(event) {
-    const files = Array.from(event.target.files);
-    if (files.length === 0) return;
+  function revokeAttachedFilePreview(file) {
+    if (file?.previewUrl) {
+      URL.revokeObjectURL(file.previewUrl);
+    }
+  }
+
+  function clearAttachedFilesState() {
+    setAttachedFiles((prev) => {
+      prev.forEach(revokeAttachedFilePreview);
+      return [];
+    });
+    setPendingAttachmentIds([]);
+  }
+
+  async function fetchAttachmentBlob(attachmentId) {
+    const response = await axios.get(`${API_BASE}/api/download-attachment/${attachmentId}`, {
+      responseType: "blob",
+    });
+    return response.data;
+  }
+
+  function closeImagePreview() {
+    setImagePreview((prev) => {
+      if (prev?.revokeOnClose && prev?.src) {
+        URL.revokeObjectURL(prev.src);
+      }
+      return null;
+    });
+  }
+
+  async function openImagePreviewFromAttachment(attachment) {
+    const existingSrc = attachmentPreviewUrls[attachment.id];
+    if (existingSrc) {
+      setImagePreview({
+        src: existingSrc,
+        name: attachment.filename || attachment.original_filename,
+        attachmentId: attachment.id,
+        revokeOnClose: false,
+      });
+      return;
+    }
+    const blob = await fetchAttachmentBlob(attachment.id);
+    const url = URL.createObjectURL(blob);
+    setImagePreview({
+      src: url,
+      name: attachment.filename || attachment.original_filename,
+      attachmentId: attachment.id,
+      blob,
+      revokeOnClose: true,
+    });
+  }
+
+  function openImagePreviewFromLocal(file) {
+    if (!file?.previewUrl) return;
+    setImagePreview({
+      src: file.previewUrl,
+      name: file.name,
+      revokeOnClose: false,
+      blob: file.rawFile || null,
+    });
+  }
+
+  async function handlePreviewDownload() {
+    if (!imagePreview) return;
+    if (imagePreview.attachmentId) {
+      await handleDownloadAttachment(imagePreview.attachmentId, imagePreview.name);
+      return;
+    }
+    if (imagePreview.blob) {
+      const url = URL.createObjectURL(imagePreview.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", imagePreview.name || "image.png");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function copyTextWithFallback(text, promptLabel = "Copy this link:") {
+    const value = String(text || "").trim();
+    if (!value) return false;
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard &&
+      typeof navigator.clipboard.writeText === "function"
+    ) {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch (_) {
+        // Fall through to prompt fallback.
+      }
+    }
+    window.prompt(promptLabel, value);
+    return true;
+  }
+
+  async function handlePreviewShare() {
+    if (!imagePreview) return;
+    try {
+      if (imagePreview.attachmentId) {
+        const response = await axios.post(`${API_BASE}/api/attachments/${imagePreview.attachmentId}/share-image`);
+        const shareableUrl = String(response.data?.shareUrl || "").trim();
+        if (!shareableUrl) {
+          throw new Error("Share URL was not returned");
+        }
+        await copyTextWithFallback(shareableUrl, "Copy this public image URL:");
+        alert("Public image link copied");
+        return;
+      }
+
+      if (/^https?:/i.test(String(imagePreview.src || ""))) {
+        await copyTextWithFallback(imagePreview.src, "Copy this public image URL:");
+        alert("Public image link copied");
+        return;
+      }
+
+      alert("This image must be uploaded first before a public share link can be created.");
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        return;
+      }
+      console.error("Image share failed:", error);
+      alert(error?.response?.data?.error || error?.message || "Failed to create public image link.");
+    }
+  }
+
+  async function uploadSelectedFiles(files) {
+    if (!files || files.length === 0) return;
+    if (!token) {
+      alert("Please login to upload or paste images and files.");
+      return;
+    }
     let targetSessionId = selectedSessionId;
     if (!targetSessionId) {
       try {
@@ -1050,9 +1247,9 @@ export default function App() {
 
     setUploading(true);
     const formData = new FormData();
-    formData.append('sessionId', targetSessionId);
-    files.forEach(file => {
-      formData.append('files', file);
+    formData.append("sessionId", targetSessionId);
+    files.forEach((file) => {
+      formData.append("files", file);
     });
 
     try {
@@ -1066,14 +1263,13 @@ export default function App() {
           id: response.data.attachmentIds[idx],
           fileType: attachment.file_type || f.type,
           analysisResult: attachment.analysis_result || null,
+          previewUrl: isImageAttachmentLike(attachment.file_type || f.type, f.name) ? URL.createObjectURL(f) : null,
+          rawFile: isImageAttachmentLike(attachment.file_type || f.type, f.name) ? f : null,
         };
       });
-      setAttachedFiles(prev => [
-        ...prev,
-        ...nextAttachedFiles,
-      ]);
+      setAttachedFiles((prev) => [...prev, ...nextAttachedFiles]);
 
-      setPendingAttachmentIds(prev => [...prev, ...response.data.attachmentIds]);
+      setPendingAttachmentIds((prev) => [...prev, ...response.data.attachmentIds]);
 
       const needsVisionRefresh = nextAttachedFiles.filter(
         (file) => file.id && isImageAttachmentLike(file.fileType, file.name) && !file.analysisResult
@@ -1109,7 +1305,6 @@ export default function App() {
                 });
                 setSessionAttachments(attRes.data.attachments || []);
               } catch (_) {
-                // Ignore background refresh failure.
               }
             }
             fetchAllUserAttachments();
@@ -1117,15 +1312,15 @@ export default function App() {
         });
       }
 
-      const csvFiles = files.filter((f) =>
-        f.type === "text/csv" || String(f.name || "").toLowerCase().endsWith(".csv")
+      const csvFiles = files.filter(
+        (f) => f.type === "text/csv" || String(f.name || "").toLowerCase().endsWith(".csv")
       );
 
       if (csvFiles.length > 0) {
         for (const csvFile of csvFiles) {
           const csvFormData = new FormData();
-          csvFormData.append('file', csvFile);
-          csvFormData.append('sessionId', targetSessionId);
+          csvFormData.append("file", csvFile);
+          csvFormData.append("sessionId", targetSessionId);
           await axios.post(`${API_BASE}/api/upload-data`, csvFormData);
         }
         const attRes = await axios.get(`${API_BASE}/api/attachments`, {
@@ -1135,18 +1330,42 @@ export default function App() {
       }
       await fetchAllUserAttachments();
     } catch (error) {
-      console.error('Upload error:', error);
-      alert('Failed to upload files: ' + (error.response?.data?.error || error.message));
+      console.error("Upload error:", error);
+      alert("Failed to upload files: " + (error.response?.data?.error || error.message));
     } finally {
       setUploading(false);
-      event.target.value = '';
     }
+  }
+
+  // Handle file attachment selection
+  async function handleFileAttachment(event) {
+    const files = Array.from(event.target.files);
+    await uploadSelectedFiles(files);
+    event.target.value = '';
   }
 
   // Remove attached file
   function removeAttachedFile(index) {
-    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
-    setPendingAttachmentIds(prev => prev.filter((_, i) => i !== index));
+    setAttachedFiles((prev) => {
+      const next = [...prev];
+      const removed = next.splice(index, 1)[0];
+      revokeAttachedFilePreview(removed);
+      return next;
+    });
+    setPendingAttachmentIds((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleInputPaste(e) {
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageFiles = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      await uploadSelectedFiles(imageFiles);
+    }
   }
 
   async function handleCaptureScreenshot() {
@@ -1289,8 +1508,7 @@ export default function App() {
 
     // Clear attached files from UI
     const attachmentIdsToSend = [...pendingAttachmentIds];
-    setAttachedFiles([]);
-    setPendingAttachmentIds([]);
+    clearAttachedFilesState();
 
     setIsTyping(true);
     try {
@@ -1408,8 +1626,7 @@ export default function App() {
     }
     setEditingMessageId(msg.id);
     setInput(msg.content || "");
-    setAttachedFiles([]);
-    setPendingAttachmentIds([]);
+    clearAttachedFilesState();
   }
 
   function cancelEditingMessage() {
@@ -1631,8 +1848,7 @@ export default function App() {
     nextUrl.searchParams.set("session", String(sessionId));
     window.history.replaceState({}, "", nextUrl.toString());
     fetchMessages(sessionId);
-    setAttachedFiles([]);
-    setPendingAttachmentIds([]);
+    clearAttachedFilesState();
     setDataAnalytics(null);
     
     if (window.innerWidth <= 768) {
@@ -2488,22 +2704,39 @@ export default function App() {
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="message-attachments">
                           {msg.attachments.map((att, idx) => (
-                            <button
-                              key={idx}
-                              type="button"
-                              className={`attachment-badge ${/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? "pasted-code-file-card" : ""}`}
-                              onClick={() => handleDownloadAttachment(att.id, att.filename)}
-                              title={`Download ${att.filename}`}
-                            >
-                              {/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? (
-                                <>
-                                  <div className="pasted-code-preview">{att.filename}</div>
-                                  <span className="pasted-code-tag">PASTED</span>
-                                </>
-                              ) : (
-                                <span>File {att.filename}</span>
-                              )}
-                            </button>
+                            isImageAttachmentLike(att.file_type, att.filename) ? (
+                              <button
+                                key={idx}
+                                type="button"
+                                className="attachment-image-card"
+                                onClick={() => openImagePreviewFromAttachment(att)}
+                                title={`Preview ${att.filename}`}
+                              >
+                                {attachmentPreviewUrls[att.id] ? (
+                                  <img src={attachmentPreviewUrls[att.id]} alt={att.filename} className="attachment-image-thumb" />
+                                ) : (
+                                  <div className="attachment-image-placeholder">Image</div>
+                                )}
+                                <span>{att.filename}</span>
+                              </button>
+                            ) : (
+                              <button
+                                key={idx}
+                                type="button"
+                                className={`attachment-badge ${/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? "pasted-code-file-card" : ""}`}
+                                onClick={() => handleDownloadAttachment(att.id, att.filename)}
+                                title={`Download ${att.filename}`}
+                              >
+                                {/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? (
+                                  <>
+                                    <div className="pasted-code-preview">{att.filename}</div>
+                                    <span className="pasted-code-tag">PASTED</span>
+                                  </>
+                                ) : (
+                                  <span>File {att.filename}</span>
+                                )}
+                              </button>
+                            )
                           ))}
                         </div>
                       )}
@@ -2553,8 +2786,7 @@ export default function App() {
                     <button
                       className="composer-active-pill"
                       onClick={() => {
-                        setAttachedFiles([]);
-                        setPendingAttachmentIds([]);
+                        clearAttachedFilesState();
                       }}
                     >
                       Files selected ({attachedFiles.length}) <span className="composer-active-close">x</span>
@@ -2572,6 +2804,16 @@ export default function App() {
                 <div className="attached-files-preview">
                   {attachedFiles.map((file, idx) => (
                     <div key={idx} className="attached-file-item">
+                      {file.previewUrl && (
+                        <button
+                          type="button"
+                          className="attached-image-preview"
+                          onClick={() => openImagePreviewFromLocal(file)}
+                          title={`Preview ${file.name}`}
+                        >
+                          <img src={file.previewUrl} alt={file.name} className="attached-image-thumb" />
+                        </button>
+                      )}
                       <div className="attached-file-copy">
                         <span>{file.name}</span>
                         {file.analysisResult && (
@@ -2580,7 +2822,7 @@ export default function App() {
                           </small>
                         )}
                       </div>
-                      <button onClick={() => removeAttachedFile(idx)}>X</button>
+                      <button className="attached-file-remove" onClick={() => removeAttachedFile(idx)}>X</button>
                     </div>
                   ))}
                 </div>
@@ -2682,6 +2924,7 @@ export default function App() {
                   value={input}
                   onChange={handleComposerInputChange}
                   onKeyDown={handleKeyDown}
+                  onPaste={handleInputPaste}
                   rows={1}
                 />
                 <button
@@ -2744,6 +2987,19 @@ export default function App() {
                           generated.map((attachment) => (
                             <div key={attachment.id} className="file-item">
                               <div className="file-info-wrapper">
+                                {isImageAttachmentLike(attachment.file_type, attachment.original_filename) && attachmentPreviewUrls[attachment.id] && (
+                                  <button
+                                    type="button"
+                                    className="file-image-preview"
+                                    onClick={() => openImagePreviewFromAttachment({
+                                      id: attachment.id,
+                                      filename: attachment.original_filename,
+                                      file_type: attachment.file_type,
+                                    })}
+                                  >
+                                    <img src={attachmentPreviewUrls[attachment.id]} alt={attachment.original_filename} className="file-image-thumb" />
+                                  </button>
+                                )}
                                 <div className="file-name-text">{attachment.original_filename}</div>
                                 <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
                                 {attachment.analysis_result && (
@@ -2776,6 +3032,19 @@ export default function App() {
                           uploaded.map((attachment) => (
                             <div key={attachment.id} className="file-item">
                               <div className="file-info-wrapper">
+                                {isImageAttachmentLike(attachment.file_type, attachment.original_filename) && attachmentPreviewUrls[attachment.id] && (
+                                  <button
+                                    type="button"
+                                    className="file-image-preview"
+                                    onClick={() => openImagePreviewFromAttachment({
+                                      id: attachment.id,
+                                      filename: attachment.original_filename,
+                                      file_type: attachment.file_type,
+                                    })}
+                                  >
+                                    <img src={attachmentPreviewUrls[attachment.id]} alt={attachment.original_filename} className="file-image-thumb" />
+                                  </button>
+                                )}
                                 <div className="file-name-text">{attachment.original_filename}</div>
                                 <div className="file-size-text">{(attachment.file_size / 1024).toFixed(1)} KB</div>
                                 {attachment.analysis_result && (
@@ -2805,6 +3074,23 @@ export default function App() {
           {/* Overlay for files sidebar on mobile */}
           {filesSidebarVisible && window.innerWidth <= 768 && (
             <div className="files-sidebar-overlay" onClick={() => setFilesSidebarVisible(false)} />
+          )}
+          {imagePreview && (
+            <div className="image-preview-overlay" onClick={closeImagePreview}>
+              <div className="image-preview-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="image-preview-topbar">
+                  <span className="image-preview-title">{imagePreview.name}</span>
+                  <div className="image-preview-actions">
+                    <button type="button" onClick={handlePreviewDownload}>Download</button>
+                    <button type="button" onClick={handlePreviewShare}>Share image</button>
+                    <button type="button" onClick={closeImagePreview}>Close</button>
+                  </div>
+                </div>
+                <div className="image-preview-body">
+                  <img src={imagePreview.src} alt={imagePreview.name} className="image-preview-full" />
+                </div>
+              </div>
+            </div>
           )}
         </main>
       </div>

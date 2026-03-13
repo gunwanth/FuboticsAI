@@ -13,6 +13,7 @@ const cheerio = require("cheerio");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const XLSX = require("xlsx");
+const jwt = require("jsonwebtoken");
 const PDFDocument = require("pdfkit");
 const PptxGenJS = require("pptxgenjs");
 const { Document, Packer, Paragraph, HeadingLevel } = require("docx");
@@ -26,12 +27,15 @@ const chatSessionModel = require("./models/chatSession");
 const messageModel = require("./models/message");
 const attachmentModel = require("./models/attachment");
 const shareChatModel = require("./models/shareChat");
+const config = require("./config/database");
 const { buildRagContext, indexAttachmentForRag, indexWebSourcesForRag } = require("./services/ragService");
 const { createImageGenerationService } = require("./services/imageGenerationService");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
+const PUBLIC_IMAGE_SHARE_EXPIRY = process.env.PUBLIC_IMAGE_SHARE_EXPIRY || "30d";
+app.set("trust proxy", 1);
 
 // ---------- CORS (dynamic allowlist) ----------
 const defaultOrigins = [
@@ -1242,6 +1246,39 @@ function resolveAttachmentDiskPath(attachment) {
   return null;
 }
 
+function isImageAttachment(attachment) {
+  if (!attachment) return false;
+  const fileType = String(attachment.file_type || "").toLowerCase();
+  const lowerName = String(attachment.original_filename || attachment.filename || "").toLowerCase();
+  return (
+    fileType.startsWith("image/") ||
+    lowerName.endsWith(".png") ||
+    lowerName.endsWith(".jpg") ||
+    lowerName.endsWith(".jpeg") ||
+    lowerName.endsWith(".webp") ||
+    lowerName.endsWith(".gif")
+  );
+}
+
+function createPublicImageShareToken(attachmentId) {
+  return jwt.sign(
+    { type: "public_image_share", attachmentId: Number(attachmentId) },
+    config.jwt.secret,
+    { expiresIn: PUBLIC_IMAGE_SHARE_EXPIRY }
+  );
+}
+
+function verifyPublicImageShareToken(token) {
+  return jwt.verify(token, config.jwt.secret);
+}
+
+function getBackendPublicBaseUrl(req) {
+  if (process.env.BACKEND_PUBLIC_URL) {
+    return String(process.env.BACKEND_PUBLIC_URL).replace(/\/+$/, "");
+  }
+  return `${req.protocol}://${req.get("host")}`;
+}
+
 // ---------- ROUTES ----------
 
 // Health check
@@ -1960,6 +1997,45 @@ app.post("/api/attachments/:id/vision-analyze", authMiddleware, async (req, res)
   }
 });
 
+app.post("/api/attachments/:id/share-image", authMiddleware, async (req, res) => {
+  try {
+    const attachmentId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(attachmentId)) {
+      return res.status(400).json({ error: "Invalid attachment id" });
+    }
+
+    const attachment = await attachmentModel.getById(attachmentId);
+    if (!attachment) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+
+    const session = await chatSessionModel.getById(attachment.session_id, req.user.id);
+    if (!session) {
+      return res.status(403).json({ error: "Unauthorized to share this attachment" });
+    }
+
+    if (!isImageAttachment(attachment)) {
+      return res.status(400).json({ error: "Only image attachments can be shared as public image links" });
+    }
+
+    const token = createPublicImageShareToken(attachment.id);
+    const shareUrl = `${getBackendPublicBaseUrl(req)}/api/public/images/${token}`;
+    res.json({
+      token,
+      shareUrl,
+      expiresIn: PUBLIC_IMAGE_SHARE_EXPIRY,
+      attachment: {
+        id: attachment.id,
+        filename: attachment.original_filename || attachment.filename,
+        file_type: attachment.file_type,
+      },
+    });
+  } catch (err) {
+    console.error("POST /api/attachments/:id/share-image error:", err);
+    res.status(500).json({ error: "Failed to create public image link" });
+  }
+});
+
 // Data upload and analytics
 app.post("/api/upload-data", authMiddleware, upload.single('file'), async (req, res) => {
   try {
@@ -2107,6 +2183,44 @@ app.get("/api/download-attachment/:id", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("GET /api/download-attachment error:", err);
     res.status(500).json({ error: "Failed to download attachment" });
+  }
+});
+
+app.get("/api/public/images/:token", async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ error: "Image token required" });
+    }
+
+    let payload;
+    try {
+      payload = verifyPublicImageShareToken(token);
+    } catch (err) {
+      return res.status(401).json({ error: "Invalid or expired image link" });
+    }
+
+    if (payload?.type !== "public_image_share" || !Number.isInteger(payload?.attachmentId)) {
+      return res.status(401).json({ error: "Invalid image link" });
+    }
+
+    const attachment = await attachmentModel.getById(payload.attachmentId);
+    if (!attachment || !isImageAttachment(attachment)) {
+      return res.status(404).json({ error: "Image not found" });
+    }
+
+    const resolvedPath = resolveAttachmentDiskPath(attachment);
+    if (!resolvedPath) {
+      return res.status(404).json({ error: "Image file not found on disk" });
+    }
+
+    res.setHeader("Content-Type", attachment.file_type || "image/png");
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(attachment.original_filename || attachment.filename || "image")}"`);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.sendFile(resolvedPath);
+  } catch (err) {
+    console.error("GET /api/public/images/:token error:", err);
+    res.status(500).json({ error: "Failed to load public image" });
   }
 });
 
