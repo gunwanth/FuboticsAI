@@ -1436,7 +1436,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const assistantMsg = generatedAttachment
         ? `Generated ${generationType.toUpperCase()} successfully: ${generatedAttachment.original_filename}`
         : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
-      const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg);
+      const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg, "generation_pipeline");
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
@@ -1472,7 +1472,12 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
         aiReply += `\n\nKnowledge Base References:\n${ragLinks}`;
       }
       const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
-      const assistantRecord = await messageModel.create(parsedSessionId, "assistant", codeExport.content);
+      const assistantRecord = await messageModel.create(
+        parsedSessionId,
+        "assistant",
+        codeExport.content,
+        resolvePreferredChatModel(model)
+      );
       for (const attachment of codeExport.attachments) {
         await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
       }
@@ -1617,7 +1622,7 @@ app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) =
       const sequencedName = await ensureSequentialSessionName(req.user.id, suggested || "Shared Chat");
       const newSession = await chatSessionModel.create(req.user.id, sequencedName || "Shared Chat");
       for (const m of normalizedHistory) {
-        await messageModel.create(newSession.id, m.role, m.content);
+      await messageModel.create(newSession.id, m.role, m.content, m.model_used || null);
       }
       const messages = await messageModel.getBySessionId(newSession.id);
       return res.json({ session: newSession, messages });
@@ -1632,7 +1637,7 @@ app.post("/api/public/share/:token/continue", authMiddleware, async (req, res) =
       sourceSession.name ? `${sourceSession.name} (shared copy)` : "Shared Chat Copy"
     );
     const sourceMessages = await messageModel.getBySessionId(sourceSession.id);
-    for (const m of sourceMessages) await messageModel.create(newSession.id, m.role, m.content);
+    for (const m of sourceMessages) await messageModel.create(newSession.id, m.role, m.content, m.model_used || null);
     const messages = await messageModel.getBySessionId(newSession.id);
     return res.json({ session: newSession, messages });
   } catch (err) {
@@ -1753,7 +1758,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const assistantMsg = generatedAttachment
         ? `Edited request processed. Generated ${generationType.toUpperCase()}: ${generatedAttachment.original_filename}`
         : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
-      const assistantId = await messageModel.create(targetMessage.session_id, "assistant", assistantMsg);
+      const assistantId = await messageModel.create(targetMessage.session_id, "assistant", assistantMsg, "generation_pipeline");
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
@@ -1792,7 +1797,12 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         aiReply += `\n\nKnowledge Base References:\n${ragLinks}`;
       }
       const codeExport = await offloadLargeCodeBlocksToFiles(targetMessage.session_id, normalizedContent, aiReply, 100);
-      const assistantRecord = await messageModel.create(targetMessage.session_id, "assistant", codeExport.content);
+      const assistantRecord = await messageModel.create(
+        targetMessage.session_id,
+        "assistant",
+        codeExport.content,
+        resolvePreferredChatModel(model)
+      );
       for (const attachment of codeExport.attachments) {
         await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
       }
@@ -1864,7 +1874,8 @@ app.post("/api/generate", authMiddleware, async (req, res) => {
     const assistantMessage = await messageModel.create(
       parsedSessionId,
       "assistant",
-      `Generated ${normalized.toUpperCase()}: ${generatedAttachment.original_filename}`
+      `Generated ${normalized.toUpperCase()}: ${generatedAttachment.original_filename}`,
+      "generation_pipeline"
     );
     await attachmentModel.linkToMessage(assistantMessage.id, generatedAttachment.id);
     const messages = await messageModel.getBySessionId(parsedSessionId);

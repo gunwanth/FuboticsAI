@@ -56,8 +56,12 @@ CREATE TABLE IF NOT EXISTS messages (
   session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
   role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   content TEXT NOT NULL,
+  model_used VARCHAR(50),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE messages
+ADD COLUMN IF NOT EXISTS model_used VARCHAR(50);
 
 CREATE TABLE IF NOT EXISTS attachments (
   id SERIAL PRIMARY KEY,

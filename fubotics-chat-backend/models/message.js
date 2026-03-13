@@ -1,17 +1,17 @@
 const db = require("../db");
 
 const messageModel = {
-  async create(sessionId, role, content) {
+  async create(sessionId, role, content, modelUsed = null) {
     const result = await db.query(
-      "INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3) RETURNING id, session_id, role, content, created_at",
-      [sessionId, role, content]
+      "INSERT INTO messages (session_id, role, content, model_used) VALUES ($1, $2, $3, $4) RETURNING id, session_id, role, content, model_used, created_at",
+      [sessionId, role, content, modelUsed]
     );
     return result.rows[0];
   },
 
   async getBySessionId(sessionId) {
     const result = await db.query(
-      `SELECT m.id, m.session_id, m.role, m.content, m.created_at,
+      `SELECT m.id, m.session_id, m.role, m.content, m.model_used, m.created_at,
               COALESCE(
                 json_agg(
                   DISTINCT jsonb_build_object(
@@ -36,7 +36,7 @@ const messageModel = {
 
   async getById(messageId) {
     const result = await db.query(
-      "SELECT id, session_id, role, content, created_at FROM messages WHERE id = $1",
+      "SELECT id, session_id, role, content, model_used, created_at FROM messages WHERE id = $1",
       [messageId]
     );
     return result.rows[0] || null;
@@ -44,7 +44,7 @@ const messageModel = {
 
   async updateContent(messageId, content) {
     const result = await db.query(
-      "UPDATE messages SET content = $2 WHERE id = $1 RETURNING id, session_id, role, content, created_at",
+      "UPDATE messages SET content = $2 WHERE id = $1 RETURNING id, session_id, role, content, model_used, created_at",
       [messageId, content]
     );
     return result.rows[0] || null;
@@ -84,7 +84,7 @@ const messageModel = {
 
   async getRecentBySessionId(sessionId, limit = 10) {
     const result = await db.query(
-      `SELECT m.id, m.session_id, m.role, m.content, m.created_at
+      `SELECT m.id, m.session_id, m.role, m.content, m.model_used, m.created_at
        FROM messages m
        WHERE m.session_id = $1
        ORDER BY m.created_at DESC

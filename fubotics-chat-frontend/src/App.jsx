@@ -38,6 +38,12 @@ const processQueue = (error, token = null) => {
 // Setup axios interceptors
 axios.interceptors.request.use(
   (config) => {
+    if (config.skipAuth) {
+      if (config.headers?.Authorization) {
+        delete config.headers.Authorization;
+      }
+      return config;
+    }
     const token = localStorage.getItem("accessToken");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -122,11 +128,14 @@ export default function App() {
   const [allUserAttachments, setAllUserAttachments] = useState([]);
   const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState({});
   const [imagePreview, setImagePreview] = useState(null);
+  const [codePreview, setCodePreview] = useState(null);
   const attachmentPreviewUrlsRef = useRef({});
   const imagePreviewRef = useRef(null);
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [openSessionMenuId, setOpenSessionMenuId] = useState(null);
+  const [sessionMenuPosition, setSessionMenuPosition] = useState(null);
   const [openFloatingChatMenu, setOpenFloatingChatMenu] = useState(false);
+  const [floatingChatMenuPosition, setFloatingChatMenuPosition] = useState(null);
   const [openFloatingModelMenu, setOpenFloatingModelMenu] = useState(false);
   const [incognitoDraftSelected, setIncognitoDraftSelected] = useState(false);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState(null);
@@ -150,10 +159,18 @@ export default function App() {
   const activeRequestControllerRef = useRef(null);
   const fileInputRef = useRef(null);
   const composerToolsRef = useRef(null);
+  const speechRecognitionRef = useRef(null);
+  const voiceBaseInputRef = useRef("");
+  const voiceCommittedTranscriptRef = useRef("");
+  const voiceShouldContinueRef = useRef(false);
+  const voiceSessionIdRef = useRef(0);
+  const inputTextareaRef = useRef(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [processSteps, setProcessSteps] = useState([]);
   const [processStepIndex, setProcessStepIndex] = useState(0);
+  const [voiceState, setVoiceState] = useState("idle");
+  const [voiceSupported, setVoiceSupported] = useState(false);
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const raw = localStorage.getItem("pinnedSessionIds");
@@ -182,12 +199,51 @@ export default function App() {
     return 0;
   });
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
-  const showIncognitoDraftHint = token && !shareToken && !selectedSessionId && incognitoDraftSelected;
-  const showFloatingSessionMenu = token && !shareToken && !showIncognitoDraftHint;
+  const showFloatingSessionMenu = token && !shareToken && !!selectedSession;
+  const showTemporaryChatToggle = token && !shareToken && !selectedSession;
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
     : "SambaNova (Anonymous)";
+  const getModelLabel = (modelId, fallback = null) => {
+    const normalized = String(modelId || fallback || "").trim().toLowerCase();
+    if (!normalized) return "";
+    if (normalized === "generation_pipeline") return "Generation Pipeline";
+    if (normalized === "sambanova") return "SambaNova";
+    if (normalized === "groq") return "Groq";
+    return availableModels.find((m) => m.id === normalized)?.label || normalized;
+  };
+  const renderSender = (msg, fallbackModel = null) => (
+    <div className="sender">
+      {msg.role === "user" ? "You" : "NexaCore AI"}
+      {msg.role !== "user" && getModelLabel(msg.model_used, fallbackModel) && (
+        <span className="model-badge">{getModelLabel(msg.model_used, fallbackModel)}</span>
+      )}
+      {msg.role === "user" && (
+        <button
+          className="message-edit-btn"
+          onClick={() => startEditingMessage(msg)}
+          type="button"
+          title="Edit and resend this message"
+        >
+          Edit
+        </button>
+      )}
+    </div>
+  );
   const activeProcessStatus = processSteps[processStepIndex] || "Generating response...";
+  const sendButtonState = loading ? "stop" : editingMessageId ? "resend" : "send";
+  const sendButtonTitle =
+    sendButtonState === "stop"
+      ? "Stop current response"
+      : sendButtonState === "resend"
+        ? "Resend edited prompt"
+        : "Send prompt";
+  const sendButtonIcon =
+    sendButtonState === "stop"
+      ? "■"
+      : sendButtonState === "resend"
+        ? "↺"
+        : "↗";
   const rotateLandingTitle = () => {
     setLandingTitle((prev) => {
       if (LANDING_TITLES.length <= 1) return prev;
@@ -314,6 +370,13 @@ export default function App() {
   }, [messages, incognitoMessages, anonymousMessages, sharedMessages, isTyping]);
 
   useEffect(() => {
+    if (openFloatingChatMenu && !selectedSession) {
+      setOpenFloatingChatMenu(false);
+      setFloatingChatMenuPosition(null);
+    }
+  }, [openFloatingChatMenu, selectedSession]);
+
+  useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth <= 768 && sidebarVisible) {
         // Don't auto-close on mobile, let user control it
@@ -391,6 +454,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const handleDocumentClick = (event) => {
+      const target = event.target;
+      if (!target?.closest?.(".session-actions") && !target?.closest?.(".session-menu-fixed")) {
+        setOpenSessionMenuId(null);
+        setSessionMenuPosition(null);
+      }
+      if (!target?.closest?.(".floating-chat-menu-wrap") && !target?.closest?.(".floating-menu-fixed")) {
+        setOpenFloatingChatMenu(false);
+        setFloatingChatMenuPosition(null);
+      }
+    };
+    document.addEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("touchstart", handleDocumentClick);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("touchstart", handleDocumentClick);
+    };
+  }, []);
+
+  useEffect(() => {
     attachmentPreviewUrlsRef.current = attachmentPreviewUrls;
   }, [attachmentPreviewUrls]);
 
@@ -414,7 +497,28 @@ export default function App() {
       if (preview?.revokeOnClose && preview.src) {
         URL.revokeObjectURL(preview.src);
       }
+        if (speechRecognitionRef.current) {
+          try {
+            voiceShouldContinueRef.current = false;
+            voiceCommittedTranscriptRef.current = "";
+            voiceSessionIdRef.current += 1;
+            speechRecognitionRef.current.onresult = null;
+            speechRecognitionRef.current.onerror = null;
+            speechRecognitionRef.current.onend = null;
+            speechRecognitionRef.current.stop();
+        } catch (_) {
+          // Ignore cleanup errors from browser speech API.
+        }
+      }
     };
+  }, []);
+
+  useEffect(() => {
+    const SpeechRecognitionCtor =
+      typeof window !== "undefined"
+        ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
+        : null;
+    setVoiceSupported(Boolean(SpeechRecognitionCtor));
   }, []);
 
   useEffect(() => {
@@ -912,6 +1016,7 @@ export default function App() {
       setPinnedSessionIds((prev) => prev.filter((id) => id !== sessionId));
       setPendingDeleteSessionId(null);
       setOpenSessionMenuId(null);
+      setSessionMenuPosition(null);
 
       if (selectedSessionId === sessionId) {
         if (remaining.length > 0) {
@@ -939,6 +1044,7 @@ export default function App() {
   async function handleShareSession(session, e) {
     e?.stopPropagation?.();
     setOpenSessionMenuId(null);
+    setSessionMenuPosition(null);
     setOpenFloatingChatMenu(false);
     let shareUrl = "";
     try {
@@ -1004,6 +1110,7 @@ export default function App() {
   async function handleRenameSession(session, e) {
     e?.stopPropagation?.();
     setOpenSessionMenuId(null);
+    setSessionMenuPosition(null);
     setOpenFloatingChatMenu(false);
     const nextName = window.prompt("Rename chat:", getSessionLabel(session));
     if (nextName === null) return;
@@ -1120,6 +1227,11 @@ export default function App() {
     return response.data;
   }
 
+  async function fetchAttachmentText(attachmentId) {
+    const blob = await fetchAttachmentBlob(attachmentId);
+    return blob.text();
+  }
+
   function closeImagePreview() {
     setImagePreview((prev) => {
       if (prev?.revokeOnClose && prev?.src) {
@@ -1228,6 +1340,44 @@ export default function App() {
     }
   }
 
+  function isPreviewableCodeAttachment(fileType, filename) {
+    const mime = String(fileType || "").toLowerCase();
+    return (
+      isLikelyCodeFilename(filename) ||
+      mime.startsWith("text/") ||
+      mime === "application/json" ||
+      mime === "application/javascript" ||
+      mime === "application/typescript" ||
+      mime === "application/xml"
+    );
+  }
+
+  async function openCodePreviewAttachment(attachment) {
+    try {
+      setCodePreview({
+        loading: true,
+        attachmentId: attachment.id,
+        name: attachment.original_filename || attachment.filename,
+        content: "",
+      });
+      const text = await fetchAttachmentText(attachment.id);
+      setCodePreview({
+        loading: false,
+        attachmentId: attachment.id,
+        name: attachment.original_filename || attachment.filename,
+        content: text,
+      });
+    } catch (error) {
+      console.error("Code preview failed:", error);
+      setCodePreview({
+        loading: false,
+        attachmentId: attachment.id,
+        name: attachment.original_filename || attachment.filename,
+        content: "Failed to load preview for this file.",
+      });
+    }
+  }
+
   async function uploadSelectedFiles(files) {
     if (!files || files.length === 0) return;
     if (!token) {
@@ -1264,7 +1414,7 @@ export default function App() {
           fileType: attachment.file_type || f.type,
           analysisResult: attachment.analysis_result || null,
           previewUrl: isImageAttachmentLike(attachment.file_type || f.type, f.name) ? URL.createObjectURL(f) : null,
-          rawFile: isImageAttachmentLike(attachment.file_type || f.type, f.name) ? f : null,
+          rawFile: f,
         };
       });
       setAttachedFiles((prev) => [...prev, ...nextAttachedFiles]);
@@ -1393,7 +1543,151 @@ export default function App() {
     }
   }
 
+  function handleVoiceInput(isResume = false) {
+    const SpeechRecognitionCtor =
+      typeof window !== "undefined"
+        ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
+        : null;
+    if (!SpeechRecognitionCtor) {
+      alert("Voice input is not supported in this browser.");
+      return;
+    }
+
+    if (voiceState !== "idle" && speechRecognitionRef.current) {
+      voiceShouldContinueRef.current = false;
+      voiceBaseInputRef.current = "";
+      voiceCommittedTranscriptRef.current = "";
+      voiceSessionIdRef.current += 1;
+      speechRecognitionRef.current.stop();
+      setVoiceState("idle");
+      return;
+    }
+
+    if (!isResume) {
+      voiceSessionIdRef.current += 1;
+    }
+    const voiceSessionId = voiceSessionIdRef.current;
+    const recognition = new SpeechRecognitionCtor();
+    speechRecognitionRef.current = recognition;
+    if (!isResume) {
+      voiceBaseInputRef.current = "";
+      voiceCommittedTranscriptRef.current = "";
+      setInput("");
+      window.requestAnimationFrame(() => {
+        if (!inputTextareaRef.current) return;
+        inputTextareaRef.current.focus();
+        inputTextareaRef.current.value = "";
+        inputTextareaRef.current.setSelectionRange(0, 0);
+      });
+    }
+    voiceShouldContinueRef.current = true;
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    recognition.maxAlternatives = 1;
+    let sessionFinalTranscript = "";
+    const applyVoiceTranscript = (spokenText) => {
+      const composedValue = [voiceBaseInputRef.current, String(spokenText || "").trim()]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      setInput(composedValue);
+      window.requestAnimationFrame(() => {
+        if (!inputTextareaRef.current) return;
+        inputTextareaRef.current.focus();
+        inputTextareaRef.current.value = composedValue;
+        const end = composedValue.length;
+        inputTextareaRef.current.setSelectionRange(end, end);
+      });
+    };
+    recognition.onstart = () => {
+      if (voiceSessionId !== voiceSessionIdRef.current) return;
+      setVoiceState("listening");
+      window.requestAnimationFrame(() => {
+        inputTextareaRef.current?.focus();
+      });
+    };
+    recognition.onresult = (event) => {
+      if (voiceSessionId !== voiceSessionIdRef.current) return;
+      let currentSessionFinal = "";
+      let interimTranscript = "";
+      for (let i = 0; i < event.results.length; i += 1) {
+        const transcript = String(event.results[i][0]?.transcript || "");
+        if (event.results[i].isFinal) {
+          currentSessionFinal += `${transcript} `;
+        } else {
+          interimTranscript += `${transcript} `;
+        }
+      }
+      sessionFinalTranscript = currentSessionFinal.trim();
+      const nextTranscript = [voiceCommittedTranscriptRef.current, sessionFinalTranscript, interimTranscript.trim()]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      applyVoiceTranscript(nextTranscript);
+    };
+    recognition.onerror = (event) => {
+      if (voiceSessionId !== voiceSessionIdRef.current) return;
+      if (event?.error === "aborted") {
+        return;
+      }
+      if (event?.error !== "no-speech") {
+        console.error("Voice input error:", event?.error || event);
+        alert("Microphone access failed or speech recognition was blocked.");
+        voiceShouldContinueRef.current = false;
+      }
+      setVoiceState("idle");
+    };
+    recognition.onend = () => {
+      if (voiceSessionId !== voiceSessionIdRef.current) return;
+      voiceCommittedTranscriptRef.current = [voiceCommittedTranscriptRef.current, sessionFinalTranscript]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      const shouldRestart = voiceShouldContinueRef.current;
+      speechRecognitionRef.current = null;
+      if (shouldRestart) {
+        setVoiceState("paused");
+        window.setTimeout(() => {
+          if (!voiceShouldContinueRef.current || speechRecognitionRef.current) return;
+          handleVoiceInput(true);
+        }, 120);
+        return;
+      }
+      setVoiceState("idle");
+      window.requestAnimationFrame(() => {
+        inputTextareaRef.current?.focus();
+      });
+    };
+
+    try {
+      recognition.start();
+    } catch (error) {
+      console.error("Voice recognition start failed:", error);
+      voiceShouldContinueRef.current = false;
+      setVoiceState("idle");
+      speechRecognitionRef.current = null;
+      alert("Could not start voice input.");
+    }
+  }
+
   async function handleSend(options = null) {
+    if (speechRecognitionRef.current) {
+      voiceShouldContinueRef.current = false;
+      voiceBaseInputRef.current = "";
+      voiceCommittedTranscriptRef.current = "";
+      voiceSessionIdRef.current += 1;
+      try {
+        speechRecognitionRef.current.onresult = null;
+        speechRecognitionRef.current.onerror = null;
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+      } catch (_) {
+        // Ignore browser speech API stop errors.
+      }
+      speechRecognitionRef.current = null;
+      setVoiceState("idle");
+    }
     if (loading) {
       if (activeRequestControllerRef.current) {
         activeRequestControllerRef.current.abort();
@@ -1425,7 +1719,7 @@ export default function App() {
       : text;
     const isAnonymousSharedMode = !!shareToken && !token;
     const isAnonymousPublicMode = !token && !shareToken;
-    const isLoggedInIncognitoMode = false;
+    const isLoggedInIncognitoMode = !!token && !shareToken && !selectedSessionId && incognitoDraftSelected;
     const activeModel = token ? selectedModel : ANONYMOUS_DEFAULT_MODEL;
     if (
       (isAnonymousSharedMode && anonymousSharedQuestionCount >= 15) ||
@@ -1556,6 +1850,28 @@ export default function App() {
         setAnonymousQuestionCount(nextCount);
         if (nextCount === 10) setSharedLimitModal("soft");
         if (nextCount >= 15) setSharedLimitModal("hard");
+        setInput("");
+        return;
+      }
+
+      if (isLoggedInIncognitoMode) {
+        const tempUser = { id: Date.now(), role: "user", content: text };
+        setIncognitoMessages((prev) => [...prev, tempUser]);
+        const historyForApi = [...incognitoMessages, tempUser].map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const res = await axios.post(`${API_BASE}/api/public/chat`, {
+          content: text,
+          history: historyForApi,
+          thinking: thinkingEnabled,
+          model: activeModel,
+        }, {
+          signal: requestController.signal,
+          skipAuth: true,
+        });
+        const assistant = String(res.data?.assistant || "").trim() || "No reply";
+        setIncognitoMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
         setInput("");
         return;
       }
@@ -1703,7 +2019,9 @@ export default function App() {
 
   function handleChatAreaClick() {
     setOpenSessionMenuId(null);
+    setSessionMenuPosition(null);
     setOpenFloatingChatMenu(false);
+    setFloatingChatMenuPosition(null);
     setOpenFloatingModelMenu(false);
     setComposerMenuOpen(false);
     if (window.innerWidth <= 768 && sidebarVisible) {
@@ -1716,6 +2034,8 @@ export default function App() {
       if (prev.includes(sessionId)) return prev.filter((id) => id !== sessionId);
       return [sessionId, ...prev];
     });
+    setOpenSessionMenuId(null);
+    setSessionMenuPosition(null);
     setOpenFloatingChatMenu(false);
   }
 
@@ -1835,6 +2155,15 @@ export default function App() {
     window.URL.revokeObjectURL(url);
   }
 
+  function openInlineCodePreview(filename, code) {
+    setCodePreview({
+      loading: false,
+      attachmentId: null,
+      name: filename,
+      content: String(code || ""),
+    });
+  }
+
   function handleSessionSelect(sessionId) {
     setSelectedSessionId(sessionId);
     setIncognitoDraftSelected(false);
@@ -1886,20 +2215,30 @@ export default function App() {
       if (nonEmpty.length > 100 && codeLikeCount >= Math.max(20, Math.ceil(nonEmpty.length * 0.2))) {
         const suggestedFile = buildInlineCodeFilename("txt", safeContent, 0);
         return (
-          <div className="pasted-code-inline-card">
+          <button
+            type="button"
+            className="pasted-code-inline-card"
+            onClick={() => openInlineCodePreview(suggestedFile, safeContent)}
+            title={`Preview ${suggestedFile}`}
+          >
             <div className="pasted-code-inline-preview">{suggestedFile}</div>
             <span className="pasted-code-tag">PASTED</span>
-            <button
-              type="button"
-              className="pasted-code-inline-download"
-              onClick={() => downloadInlineCodeFile(suggestedFile, safeContent)}
-            >
-              Download code file
-            </button>
+            <div className="pasted-code-inline-actions">
+              <button
+                type="button"
+                className="pasted-code-inline-download"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  downloadInlineCodeFile(suggestedFile, safeContent);
+                }}
+              >
+                Download code file
+              </button>
+            </div>
             <div className="pasted-code-inline-hint">
               Code is over 100 lines. Reply with what to do next: explain, debug, refactor, optimize, test, or convert.
             </div>
-          </div>
+          </button>
         );
       }
     }
@@ -1919,20 +2258,31 @@ export default function App() {
       if (collapseAllCodeBlocks || blockLineCount > 100) {
         const suggestedFile = buildInlineCodeFilename(block.language, block.code, idx);
         elements.push(
-          <div className="pasted-code-inline-card" key={`code-file-${idx}`}>
+          <button
+            type="button"
+            className="pasted-code-inline-card"
+            key={`code-file-${idx}`}
+            onClick={() => openInlineCodePreview(suggestedFile, block.code)}
+            title={`Preview ${suggestedFile}`}
+          >
             <div className="pasted-code-inline-preview">{suggestedFile}</div>
             <span className="pasted-code-tag">PASTED</span>
-            <button
-              type="button"
-              className="pasted-code-inline-download"
-              onClick={() => downloadInlineCodeFile(suggestedFile, block.code)}
-            >
-              Download code file
-            </button>
+            <div className="pasted-code-inline-actions">
+              <button
+                type="button"
+                className="pasted-code-inline-download"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  downloadInlineCodeFile(suggestedFile, block.code);
+                }}
+              >
+                Download code file
+              </button>
+            </div>
             <div className="pasted-code-inline-hint">
               Code is over 100 lines. Reply with what to do next: explain, debug, refactor, optimize, test, or convert.
             </div>
-          </div>
+          </button>
         );
       } else {
         elements.push(
@@ -2262,48 +2612,33 @@ export default function App() {
                 <div className="session-icon" />
                 <span className="session-name">
                   {getSessionLabel(session)}
-                  {pinnedSet.has(session.id) ? " (Pinned)" : ""}
+                  {pinnedSet.has(session.id) && <span className="session-pin-indicator" aria-hidden="true">📌</span>}
                 </span>
                 <div
                   className="session-actions"
-                  onMouseEnter={() => {
-                    setPendingDeleteSessionId(null);
-                    setOpenSessionMenuId(session.id);
-                  }}
-                  onMouseLeave={() => setOpenSessionMenuId((prev) => (prev === session.id ? null : prev))}
                 >
                   <button
                     className="session-menu-btn"
                     onClick={(e) => {
                       e.stopPropagation();
                       setPendingDeleteSessionId(null);
-                      setOpenSessionMenuId((prev) => (prev === session.id ? null : session.id));
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setOpenSessionMenuId((prev) => {
+                        if (prev === session.id) {
+                          setSessionMenuPosition(null);
+                          return null;
+                        }
+                        setSessionMenuPosition({
+                          top: rect.bottom + 8,
+                          left: Math.min(rect.right - 172, window.innerWidth - 188),
+                        });
+                        return session.id;
+                      });
                     }}
                     title="Chat actions"
                   >
                     ...
                   </button>
-                  {openSessionMenuId === session.id && (
-                    <div className="session-menu" onClick={(e) => e.stopPropagation()}>
-                      <>
-                          <button onClick={(e) => { e.stopPropagation(); togglePinSession(session.id); }}>
-                            {pinnedSet.has(session.id) ? "Unpin Chat" : "Pin Chat"}
-                          </button>
-                          <button onClick={(e) => handleShareSession(session, e)}>Share Chat</button>
-                          <button onClick={(e) => handleRenameSession(session, e)}>Rename Chat</button>
-                          <button
-                            className="danger"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setOpenSessionMenuId(null);
-                            setPendingDeleteSessionId(session.id);
-                          }}
-                        >
-                          Delete Chat
-                        </button>
-                      </>
-                    </div>
-                  )}
                 </div>
               </div>
             ))}
@@ -2372,6 +2707,45 @@ export default function App() {
             )}
           </div>
         </aside>
+
+        {openSessionMenuId && sessionMenuPosition && (
+          <div
+            className="session-menu session-menu-fixed"
+            style={{
+              top: `${sessionMenuPosition.top}px`,
+              left: `${sessionMenuPosition.left}px`,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const activeSession = sessions.find((session) => session.id === openSessionMenuId);
+              if (!activeSession) return null;
+              return (
+                <>
+                  <button onClick={(e) => { e.stopPropagation(); togglePinSession(activeSession.id); }}>
+                    {pinnedSet.has(activeSession.id) ? "Unpin Chat" : "Pin Chat"}
+                  </button>
+                  <button onClick={(e) => handleShareSession(activeSession, e)}>Share Chat</button>
+                  <button onClick={(e) => handleRenameSession(activeSession, e)}>Rename Chat</button>
+                  <button onClick={(e) => { e.stopPropagation(); setFilesSidebarVisible(true); setOpenSessionMenuId(null); setSessionMenuPosition(null); }}>
+                    Files
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenSessionMenuId(null);
+                      setSessionMenuPosition(null);
+                      setPendingDeleteSessionId(activeSession.id);
+                    }}
+                  >
+                    Delete Chat
+                  </button>
+                </>
+              );
+            })()}
+          </div>
+        )}
 
         {sidebarVisible && window.innerWidth <= 768 && (
           <div className="sidebar-overlay" onClick={() => setSidebarVisible(false)} />
@@ -2535,62 +2909,47 @@ export default function App() {
                 <div className="floating-chat-menu-wrap">
                   <button
                     className="floating-pill floating-dots-btn"
-                    onClick={() => {
+                    onClick={(e) => {
                       setOpenFloatingModelMenu(false);
-                      setOpenFloatingChatMenu((prev) => !prev);
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setOpenFloatingChatMenu((prev) => {
+                        if (prev) {
+                          setFloatingChatMenuPosition(null);
+                          return false;
+                        }
+                        setFloatingChatMenuPosition({
+                          top: rect.bottom + 8,
+                          right: Math.max(window.innerWidth - rect.right, 12),
+                        });
+                        return true;
+                      });
                     }}
                     title="Chat actions"
                   >
                     ...
                   </button>
-                  {openFloatingChatMenu && (
-                    <div className="floating-menu">
-                      {selectedSession ? (
-                        <>
-                          <button onClick={() => togglePinSession(selectedSession.id)}>
-                            {pinnedSet.has(selectedSession.id) ? "Unpin Chat" : "Pin Chat"}
-                          </button>
-                          <button onClick={() => handleShareSession(selectedSession)}>Share Chat</button>
-                          <button onClick={() => handleRenameSession(selectedSession)}>Rename Chat</button>
-                          <button
-                            className="danger"
-                            onClick={() => {
-                              setOpenFloatingChatMenu(false);
-                              setPendingDeleteSessionId(selectedSession.id);
-                            }}
-                          >
-                            Delete Chat
-                          </button>
-                        </>
-                      ) : !token ? (
-                        <button
-                          onClick={() => {
-                            setIncognitoDraftSelected(true);
-                            setIncognitoMessages([]);
-                            setOpenFloatingChatMenu(false);
-                          }}
-                        >
-                          Use Incognito Draft
-                        </button>
-                      ) : null}
-                      
-                    </div>
-                  )}
                 </div>
               )}
-              {showIncognitoDraftHint && (
+              {showTemporaryChatToggle && (
                 <button
-                  className="floating-pill floating-incognito-draft"
-                  title="Incognito draft mode is active"
+                  className={`floating-pill floating-incognito-draft ${incognitoDraftSelected ? "active" : ""}`}
+                  title={incognitoDraftSelected ? "Temporary chat is active" : "Start a temporary unsaved chat"}
                   onClick={() => {
-                    setIncognitoDraftSelected(false);
-                    setIncognitoMessages([]);
+                    if (incognitoDraftSelected) {
+                      setIncognitoDraftSelected(false);
+                      setIncognitoMessages([]);
+                      setInput("");
+                      clearAttachedFilesState();
+                    } else {
+                      setIncognitoDraftSelected(true);
+                      setIncognitoMessages([]);
+                    }
                     setInput("");
                     setOpenFloatingChatMenu(false);
                     setOpenFloatingModelMenu(false);
                   }}
                 >
-                  . . Incognito Draft (On)
+                  {incognitoDraftSelected ? "Temporary Chat On" : "Temporary Chat"}
                 </button>
               )}
             </div>
@@ -2615,7 +2974,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -2638,7 +2997,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -2652,7 +3011,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      <div className="sender">{msg.role === "user" ? "You" : "NexaCore AI"}</div>
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -2688,19 +3047,7 @@ export default function App() {
                       {msg.role === "user" ? "U" : "AI"}
                     </div>
                     <div className="bubble">
-                      <div className="sender">
-                        {msg.role === "user" ? "You" : "NexaCore AI"}
-                        {msg.role === "user" && (
-                          <button
-                            className="message-edit-btn"
-                            onClick={() => startEditingMessage(msg)}
-                            type="button"
-                            title="Edit and resend this message"
-                          >
-                            Edit
-                          </button>
-                        )}
-                      </div>
+                      {renderSender(msg)}
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="message-attachments">
                           {msg.attachments.map((att, idx) => (
@@ -2724,8 +3071,12 @@ export default function App() {
                                 key={idx}
                                 type="button"
                                 className={`attachment-badge ${/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? "pasted-code-file-card" : ""}`}
-                                onClick={() => handleDownloadAttachment(att.id, att.filename)}
-                                title={`Download ${att.filename}`}
+                                onClick={() => (
+                                  isPreviewableCodeAttachment(att.file_type, att.filename)
+                                    ? openCodePreviewAttachment(att)
+                                    : handleDownloadAttachment(att.id, att.filename)
+                                )}
+                                title={isPreviewableCodeAttachment(att.file_type, att.filename) ? `Preview ${att.filename}` : `Download ${att.filename}`}
                               >
                                 {/\[PASTED CODE FILE\]/i.test(msg.content || "") && isLikelyCodeFilename(att.filename) ? (
                                   <>
@@ -2822,6 +3173,34 @@ export default function App() {
                           </small>
                         )}
                       </div>
+                      {isPreviewableCodeAttachment(file.fileType, file.name) && (
+                        <button
+                          type="button"
+                          className="attached-file-preview-btn"
+                          onClick={async () => {
+                            if (file.id) {
+                              await openCodePreviewAttachment({
+                                id: file.id,
+                                original_filename: file.name,
+                                file_type: file.fileType,
+                              });
+                              return;
+                            }
+                            if (file.rawFile instanceof Blob) {
+                              const text = await file.rawFile.text();
+                              setCodePreview({
+                                loading: false,
+                                attachmentId: null,
+                                name: file.name,
+                                content: text,
+                              });
+                            }
+                          }}
+                          title={`Preview ${file.name}`}
+                        >
+                          View Preview
+                        </button>
+                      )}
                       <button className="attached-file-remove" onClick={() => removeAttachedFile(idx)}>X</button>
                     </div>
                   ))}
@@ -2920,6 +3299,7 @@ export default function App() {
                   )}
                 </div>
                 <textarea
+                  ref={inputTextareaRef}
                   placeholder={composerCodeDraft ? "Reply..." : "Ask anything"}
                   value={input}
                   onChange={handleComposerInputChange}
@@ -2927,20 +3307,32 @@ export default function App() {
                   onPaste={handleInputPaste}
                   rows={1}
                 />
+                {voiceSupported && (
+                    <button
+                      className={`voice-btn ${voiceState !== "idle" ? "voice-btn-active" : ""} ${voiceState === "paused" ? "voice-btn-paused" : ""}`}
+                      onClick={handleVoiceInput}
+                      type="button"
+                      title={voiceState === "idle" ? "Start voice input" : voiceState === "paused" ? "Resume voice input" : "Stop voice input"}
+                      aria-label={voiceState === "idle" ? "Start voice input" : voiceState === "paused" ? "Resume voice input" : "Stop voice input"}
+                    >
+                      <span className="voice-btn-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" className="voice-btn-svg">
+                          <rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" strokeWidth="1.8" />
+                          <path d="M6.5 11.5C6.5 15.0899 9.41015 18 13 18H11C14.5899 18 17.5 15.0899 17.5 11.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          <path d="M12 18V21" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          <path d="M9 21H15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                        </svg>
+                      </span>
+                    </button>
+                  )}
                 <button
-                  className="files-inline-btn"
-                  onClick={() => setFilesSidebarVisible((prev) => !prev)}
-                  disabled={!token}
-                  title={token ? "Toggle Files" : "Login to view files"}
-                >
-                  Files
-                </button>
-                <button
-                  className="send-btn"
+                  className={`send-btn send-btn-${sendButtonState}`}
                   onClick={() => handleSend(composerCodeDraft ? { codeDraft: composerCodeDraft } : undefined)}
                   disabled={!loading && (!input.trim() && attachedFiles.length === 0 && !composerCodeDraft)}
+                  title={sendButtonTitle}
+                  aria-label={sendButtonTitle}
                 >
-                  {loading ? "Stop" : editingMessageId ? "Resend" : "Send"}
+                  <span className="send-btn-icon" aria-hidden="true">{sendButtonIcon}</span>
                 </button>
               </div>
             </div>
@@ -3008,13 +3400,24 @@ export default function App() {
                                   </div>
                                 )}
                               </div>
-                              <button
-                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
-                                className="file-download-btn"
-                                title="Download"
-                              >
-                                Download
-                              </button>
+                              <div className="file-item-actions">
+                                {isPreviewableCodeAttachment(attachment.file_type, attachment.original_filename) && (
+                                  <button
+                                    onClick={() => openCodePreviewAttachment(attachment)}
+                                    className="file-preview-btn"
+                                    title="View preview"
+                                  >
+                                    View Preview
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
+                                  className="file-download-btn"
+                                  title="Download"
+                                >
+                                  Download
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -3053,13 +3456,24 @@ export default function App() {
                                   </div>
                                 )}
                               </div>
-                              <button
-                                onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
-                                className="file-download-btn"
-                                title="Download"
-                              >
-                                Download
-                              </button>
+                              <div className="file-item-actions">
+                                {isPreviewableCodeAttachment(attachment.file_type, attachment.original_filename) && (
+                                  <button
+                                    onClick={() => openCodePreviewAttachment(attachment)}
+                                    className="file-preview-btn"
+                                    title="View preview"
+                                  >
+                                    View Preview
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDownloadAttachment(attachment.id, attachment.original_filename)}
+                                  className="file-download-btn"
+                                  title="Download"
+                                >
+                                  Download
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -3074,6 +3488,85 @@ export default function App() {
           {/* Overlay for files sidebar on mobile */}
           {filesSidebarVisible && window.innerWidth <= 768 && (
             <div className="files-sidebar-overlay" onClick={() => setFilesSidebarVisible(false)} />
+          )}
+          {openFloatingChatMenu && floatingChatMenuPosition && (
+            <div
+              className="floating-menu floating-menu-fixed"
+              style={{
+                top: `${floatingChatMenuPosition.top}px`,
+                right: `${floatingChatMenuPosition.right}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {selectedSession ? (
+                <>
+                  <button onClick={() => togglePinSession(selectedSession.id)}>
+                    {pinnedSet.has(selectedSession.id) ? "Unpin Chat" : "Pin Chat"}
+                  </button>
+                  <button onClick={() => handleShareSession(selectedSession)}>Share Chat</button>
+                  <button onClick={() => {
+                    setOpenFloatingChatMenu(false);
+                    setFloatingChatMenuPosition(null);
+                    setFilesSidebarVisible(true);
+                  }}>
+                    Files
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      setOpenFloatingChatMenu(false);
+                      setFloatingChatMenuPosition(null);
+                      setPendingDeleteSessionId(selectedSession.id);
+                    }}
+                  >
+                    Delete Chat
+                  </button>
+                </>
+              ) : !token ? (
+                <button
+                  onClick={() => {
+                    setIncognitoDraftSelected(true);
+                    setIncognitoMessages([]);
+                    setOpenFloatingChatMenu(false);
+                    setFloatingChatMenuPosition(null);
+                  }}
+                >
+                  Use Incognito Draft
+                </button>
+              ) : null}
+            </div>
+          )}
+          {codePreview && (
+            <>
+              <div className="code-preview-overlay" onClick={() => setCodePreview(null)} />
+              <aside className="code-preview-sidebar" onClick={(e) => e.stopPropagation()}>
+                <div className="code-preview-header">
+                  <div className="code-preview-title-wrap">
+                    <div className="code-preview-kicker">Code Preview</div>
+                    <div className="code-preview-title">{codePreview.name}</div>
+                  </div>
+                  <div className="code-preview-actions">
+                    {!codePreview.loading && codePreview.attachmentId && (
+                      <button
+                        type="button"
+                        className="file-download-btn"
+                        onClick={() => handleDownloadAttachment(codePreview.attachmentId, codePreview.name)}
+                      >
+                        Download
+                      </button>
+                    )}
+                    <button type="button" className="close-files-btn" onClick={() => setCodePreview(null)}>X</button>
+                  </div>
+                </div>
+                <div className="code-preview-body">
+                  {codePreview.loading ? (
+                    <div className="code-preview-loading">Loading preview...</div>
+                  ) : (
+                    <pre className="code-preview-content"><code>{codePreview.content}</code></pre>
+                  )}
+                </div>
+              </aside>
+            </>
           )}
           {imagePreview && (
             <div className="image-preview-overlay" onClick={closeImagePreview}>
