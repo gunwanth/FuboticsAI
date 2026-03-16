@@ -23,7 +23,7 @@ fubotics-chat/
 ```bash
 cd fubotics-chat-backend
 npm install
-# Create .env with OPENAI_API_KEY
+# Create .env with SAMBANOVA_API_KEY
 npm run dev
 ```
 
@@ -46,19 +46,20 @@ Visit `http://localhost:5173` (or your frontend dev URL) to access the applicati
 
 ## Features
 
-- ✨ AI-powered chat with OpenAI
+- ✨ AI-powered chat with Dino 1.0 (Web-Connected Agent)
 - 💾 Persistent chat sessions and history
+- 🦕 Autonomous self-learning and web data extraction
 - 🎨 Clean, modern UI with React
 - 💻 Code block syntax highlighting
 - 🔄 Multi-session management
-- ⚡ Fast development with Vite
+- ⚡ Powered by high-speed Web LLM APIs
 
 ## Architecture
 
 ### Backend
-- Express.js server with SQLite database
-- RESTful API for session and message management
-- OpenAI API integration for AI responses
+- Express.js server with PostgreSQL database
+- Web-Connected Agentic loop for autonomous search and learning
+- SambaNova API integration for high-performance reasoning
 
 ### Frontend
 - React SPA built with Vite
@@ -76,7 +77,7 @@ For detailed information, see:
 ## Tech Stack
 
 **Backend:**
-- Node.js, Express.js, SQLite3, OpenAI API
+- Node.js, Express.js, PostgreSQL, SambaNova API
 
 **Frontend:**
 - React, Vite, Axios

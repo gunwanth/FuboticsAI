@@ -530,7 +530,7 @@ a:hover { text-decoration: underline; }
 
 /* ── Input Area ─────────────────────────────────────────────── */
 .input-area {
-  position: absolute; left: 50%; bottom: 0.5rem; transform: translateX(-50%);
+  position: absolute; left: 50%; bottom: 2.4rem; transform: translateX(-50%);
   width: min(1080px, calc(100% - 0.7rem)); background: transparent; border: none; padding: 0; z-index: 72;
 }
 .chat-area.files-open .input-area { width: min(1080px, calc(100% - 320px - 0.7rem)); }
@@ -624,6 +624,7 @@ a:hover { text-decoration: underline; }
 /* Input wrapper */
 /* ── Input Wrapper — tight single-row, buttons flush to textarea height ── */
 .input-wrapper {
+  position: relative;
   width: 100%;
   background: var(--surface);
   border: 1px solid var(--border-hi);
@@ -681,6 +682,47 @@ a:hover { text-decoration: underline; }
 }
 .attach-btn:disabled, .csv-upload-btn:disabled, .voice-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .chat-area.landing-mode .attach-btn { width: 40px; height: 40px; }
+
+/* Agent Toggle Button */
+.agent-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  margin: 0 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hi);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: 'Syne', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.2s var(--ease-smooth);
+  flex-shrink: 0;
+}
+.agent-toggle-btn:hover {
+  background: var(--surface-3);
+  border-color: var(--text-2);
+  color: var(--text);
+}
+.agent-toggle-btn.active {
+  background: var(--sage-dim);
+  border-color: var(--sage);
+  color: var(--sage);
+  box-shadow: 0 0 12px var(--sage-dim);
+}
+.agent-toggle-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+.agent-toggle-status {
+  font-size: 0.6rem;
+  opacity: 0.9;
+}
+
 .voice-btn-active {
   background: var(--accent-dim);
   border-color: var(--accent);
@@ -1035,9 +1077,69 @@ a:hover { text-decoration: underline; }
   .chat-window { padding: 4.2rem 0.5rem 8.8rem; }
   .message-avatar { width: 26px; height: 26px; }
   .bubble { max-width: 95%; }
-  .input-area { width: calc(100% - 0.42rem); bottom: 0.22rem; }
+  .input-area { width: calc(100% - 0.42rem); bottom: 2.4rem; }
   .floating-controls-left, .floating-controls-right { gap: 0.3rem; }
   .floating-new-chat-btn { min-width: 40px; width: 40px; }
   .floating-incognito-draft { font-size: 0.68rem; padding: 0 0.55rem; }
   .hero-title { font-size: 1.6rem; }
 }
+
+/* ── Dino 1.0 Agent Toggle - External ────────────────────────── */
+.composer-footer {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 14px;
+  z-index: 100;
+  display: flex;
+  pointer-events: auto;
+}
+
+.agent-toggle-btn-ext {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border-hi);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-smooth);
+  opacity: 0.45;
+  filter: grayscale(1);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+.agent-toggle-btn-ext:hover {
+  opacity: 1;
+  filter: grayscale(0);
+  background: var(--surface-3);
+  border-color: var(--accent);
+  transform: scale(1.05);
+}
+
+.agent-toggle-btn-ext.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 10px var(--accent-dim);
+  opacity: 1;
+  filter: grayscale(0);
+}
+
+.agent-toggle-btn-ext .agent-toggle-icon {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.agent-status-pill.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+  
+  .agent-status-pill.inactive {
+    background: var(--surface-2);
+    color: var(--text-2);
+    border: 1px solid var(--border-hi);
+    opacity: 0.6;
+  }

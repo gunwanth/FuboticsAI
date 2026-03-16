@@ -2,7 +2,6 @@ require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
-const Groq = require("groq-sdk");
 const multer = require("multer");
 const csv = require("csv-parser");
 const fs = require("fs");
@@ -29,6 +28,8 @@ const attachmentModel = require("./models/attachment");
 const shareChatModel = require("./models/shareChat");
 const config = require("./config/database");
 const { buildRagContext, indexAttachmentForRag, indexWebSourcesForRag } = require("./services/ragService");
+const knowledgeSourceModel = require("./models/knowledgeSource");
+const knowledgeChunkModel = require("./models/knowledgeChunk");
 const { createImageGenerationService } = require("./services/imageGenerationService");
 
 const app = express();
@@ -252,14 +253,21 @@ async function analyzeFile(filePath, fileType, originalFilename) {
   }
 }
 
-// ---------- GROQ / AI SETUP ----------
-const groqKey = process.env.GROQ_API_KEY;
-if (!groqKey) {
-  console.warn("⚠️ GROQ_API_KEY is NOT set in environment!");
-} else {
-  console.log("✅ GROQ_API_KEY loaded.");
-}
-const groq = new Groq({ apiKey: groqKey });
+// ---------- LLM / AI SETUP ----------
+const groqApiKey = process.env.GROQ_API_KEY || null;
+const groqBaseUrl = (process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1").replace(/\/+$/, "");
+const groqChatModel = process.env.GROQ_CHAT_MODEL || "llama-3.3-70b-versatile";
+const dinoSelfLearningEnabled = String(process.env.DINO_SELF_LEARNING || "true").toLowerCase() === "true";
+const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "true").toLowerCase() === "true";
+const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
+const hfRouterBaseUrl = (process.env.HF_ROUTER_BASE_URL || "https://router.huggingface.co/v1").replace(/\/+$/, "");
+const hfChatModel = process.env.HF_CHAT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
+const dinoAgentModel = process.env.DINO_AGENT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
+let hfChatPermissionDenied = false;
+const dinoAgentMaxIterations = Math.min(
+  8,
+  Math.max(1, Number.parseInt(process.env.DINO_AGENT_MAX_ITERATIONS || "5", 10))
+);
 const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
 const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
 const sambaNovaChatModel = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
@@ -276,8 +284,14 @@ const freepikPollIntervalMs = Math.min(
   5000,
   Math.max(500, Number.parseInt(process.env.FREEPIK_POLL_INTERVAL_MS || "1200", 10))
 );
-const huggingFaceApiKey = process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
+const huggingFaceApiKey = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
 const huggingFaceImageModel = process.env.HF_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
+const hfImageBaseUrl = (process.env.HF_IMAGE_BASE_URL || "https://router.huggingface.co").replace(/\/+$/, "");
+const hfImageProvider = String(process.env.HF_IMAGE_PROVIDER || "hf-inference").trim() || "hf-inference";
+const hfImageWidth = Math.min(1536, Math.max(256, Number.parseInt(process.env.HF_IMAGE_WIDTH || "1024", 10)));
+const hfImageHeight = Math.min(1536, Math.max(256, Number.parseInt(process.env.HF_IMAGE_HEIGHT || "1024", 10)));
+const hfImageSteps = Math.min(60, Math.max(1, Number.parseInt(process.env.HF_IMAGE_STEPS || "30", 10)));
+const hfImageGuidance = Math.min(20, Math.max(1, Number.parseFloat(process.env.HF_IMAGE_GUIDANCE || "7.5")));
 const pollinationsBaseUrl = (process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai").replace(/\/$/, "");
 const pollinationsImageModel = process.env.POLLINATIONS_IMAGE_MODEL || "flux";
 const localImageWorkerUrl = (process.env.LOCAL_IMAGE_WORKER_URL || "").trim();
@@ -296,18 +310,25 @@ const CHAT_MODELS = {
   groq: {
     id: "groq",
     label: "Groq (Llama 3.3 70B)",
-    enabled: Boolean(groqKey),
-    model: "llama-3.3-70b-versatile",
+    enabled: Boolean(groqApiKey),
+    model: groqChatModel,
   },
-  sambanova: {
-    id: "sambanova",
-    label: "SambaNova",
-    enabled: Boolean(sambaNovaApiKey),
-    model: sambaNovaChatModel,
+  hf: {
+    id: "hf",
+    label: "Hugging Face (hf-inference)",
+    enabled: Boolean(hfToken),
+    model: hfChatModel,
+  },
+  dino: {
+    id: "dino",
+    label: "Dino 1.0 (Web-Connected Agent)",
+    enabled: Boolean(hfToken),
+    model: dinoAgentModel,
   },
 };
 
-const defaultChatModel = CHAT_MODELS.groq.enabled ? "groq" : (CHAT_MODELS.sambanova.enabled ? "sambanova" : "groq");
+const defaultChatModel =
+  ["groq", "hf", "dino"].find((id) => CHAT_MODELS[id]?.enabled) || "groq";
 
 function createFallbackPng(prompt = "") {
   const width = 768;
@@ -569,16 +590,12 @@ Conversation context (use this as source material when relevant):
 ${contextText || "No additional context provided."}
 
 Return only final content (no meta commentary).`;
-  const response = await groq.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
-    messages: [
-      { role: "system", content: "You are a professional content generator." },
-      { role: "user", content: contentPrompt },
-    ],
-    max_tokens: 2500,
-    temperature: 0.6,
-  });
-  return response.choices?.[0]?.message?.content?.trim() || prompt;
+  const messages = [
+    { role: "system", content: "You are a professional content generator." },
+    { role: "user", content: contentPrompt },
+  ];
+  const response = await sendSambaNovaCompletion(messages, 2500, 0.6);
+  return response?.trim() || prompt;
 }
 
 async function suggestSessionNameFromPrompt(prompt) {
@@ -620,16 +637,12 @@ async function suggestSessionNameFromPrompt(prompt) {
   })();
 
   try {
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: "Generate a short, clear chat title (max 6 words). Return title only." },
-        { role: "user", content: raw },
-      ],
-      max_tokens: 20,
-      temperature: 0.2,
-    });
-    const title = (response.choices?.[0]?.message?.content || "")
+    const messages = [
+      { role: "system", content: "Generate a short, clear chat title (max 6 words). Return title only." },
+      { role: "user", content: raw },
+    ];
+    const response = await sendSambaNovaCompletion(messages, 20, 0.2);
+    const title = (response || "")
       .replace(/["`]/g, "")
       .replace(/\s+/g, " ")
       .trim()
@@ -1061,6 +1074,111 @@ async function generateNotesFile(sessionId, prompt, contextText = "") {
 }
 
 async function generateImageFile(sessionId, prompt) {
+  // Try HF Inference Providers first (matches HF `InferenceClient(provider="hf-inference")` behavior).
+  if (huggingFaceApiKey && huggingFaceImageModel) {
+    try {
+      const promptForGenerator = await imageGenerationService.buildImagePromptWithSamba(prompt);
+      const provider = hfImageProvider.replace(/^\/+|\/+$/g, "") || "hf-inference";
+      const url = `${hfImageBaseUrl}/${provider}/models/${encodeURIComponent(huggingFaceImageModel)}`;
+
+      let lastErr = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const res = await axios.post(
+          url,
+          {
+            inputs: promptForGenerator,
+            parameters: {
+              width: hfImageWidth,
+              height: hfImageHeight,
+              num_inference_steps: hfImageSteps,
+              guidance_scale: hfImageGuidance,
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${huggingFaceApiKey}`,
+              "Content-Type": "application/json",
+              Accept: "image/png",
+            },
+            responseType: "arraybuffer",
+            timeout: 90000,
+            validateStatus: () => true,
+          }
+        );
+
+        const contentType = String(res.headers["content-type"] || "").toLowerCase();
+        if (contentType.startsWith("image/")) {
+          const imageBuffer = Buffer.from(res.data);
+          const ext = contentType.includes("jpeg")
+            ? "jpg"
+            : contentType.includes("webp")
+            ? "webp"
+            : "png";
+          const filename = buildGeneratedFilename(prompt, "image", ext);
+          const filePath = path.join(generatedDir, filename);
+          fs.writeFileSync(filePath, imageBuffer);
+          return attachmentModel.create(
+            sessionId,
+            filename,
+            filename,
+            filePath,
+            contentType || "image/png",
+            fs.statSync(filePath).size,
+            JSON.stringify({
+              type: "generated_image",
+              prompt,
+              prompt_for_generator: promptForGenerator,
+              provider: "huggingface_inference_providers",
+              hf_provider: provider,
+              hf_model: huggingFaceImageModel,
+            }),
+            true
+          );
+        }
+
+        const bodyText = Buffer.from(res.data || "").toString("utf8");
+        let payload = {};
+        try {
+          payload = JSON.parse(bodyText);
+        } catch (_) {
+          payload = { error: bodyText.substring(0, 300) };
+        }
+
+        if (res.status === 403) {
+          const detail = String(payload?.error || payload?.message || bodyText || "")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (detail.toLowerCase().includes("inference providers") || detail.toLowerCase().includes("sufficient permissions")) {
+            throw new Error("HF token lacks Inference Providers permission (403).");
+          }
+          throw new Error(payload?.error || payload?.message || "HF request forbidden (403).");
+        }
+
+        if (res.status === 429) {
+          const retryAfter = res.headers["retry-after"];
+          const parsed = Number.parseFloat(String(retryAfter || ""));
+          const waitMs = Number.isFinite(parsed) && parsed > 0 ? Math.min(30000, parsed * 1000) : 800 * Math.pow(2, attempt);
+          await sleepMs(waitMs);
+          continue;
+        }
+
+        if (payload?.estimated_time) {
+          await sleepMs(Math.ceil(payload.estimated_time * 1000));
+          continue;
+        }
+
+        lastErr = new Error(payload?.error || payload?.message || `HF image generation failed (${res.status})`);
+        break;
+      }
+
+      if (lastErr) {
+        console.error("HF Inference Providers image generation failed:", lastErr.message);
+      }
+    } catch (err) {
+      console.error("HF Inference Providers image generation failed:", err?.message || err);
+    }
+  }
+
   return imageGenerationService.generateImageFile(sessionId, prompt);
 }
 
@@ -1102,34 +1220,187 @@ function resolvePreferredChatModel(value) {
   return defaultChatModel;
 }
 
-async function sendGroqCompletion(messages, maxTokens, temperature) {
-  const response = await groq.chat.completions.create({
-    model: CHAT_MODELS.groq.model,
-    messages,
-    max_tokens: maxTokens,
-    temperature,
-  });
-  return response.choices?.[0]?.message?.content || "";
+function formatAxiosError(err) {
+  const status = err?.response?.status;
+  const code = err?.code;
+  const data = err?.response?.data;
+
+  let detail = "";
+  if (typeof data === "string") {
+    detail = data;
+  } else if (data && typeof data === "object") {
+    detail =
+      data?.error?.message ||
+      data?.error ||
+      data?.message ||
+      data?.detail ||
+      "";
+    if (!detail) {
+      try {
+        detail = JSON.stringify(data);
+      } catch (_) {
+        detail = String(data);
+      }
+    }
+  }
+
+  const parts = [];
+  if (status) parts.push(`HTTP ${status}`);
+  if (code) parts.push(String(code));
+  if (detail) parts.push(String(detail).replace(/\s+/g, " ").trim().slice(0, 500));
+  if (err?.message) parts.push(String(err.message));
+  return parts.filter(Boolean).join(" | ") || "request error";
 }
 
-async function sendSambaNovaCompletion(messages, maxTokens, temperature) {
-  const response = await axios.post(
-    `${sambaNovaBaseUrl}/chat/completions`,
-    {
-      model: CHAT_MODELS.sambanova.model,
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function postChatCompletionsWithRetry({
+  url,
+  payload,
+  headers,
+  timeoutMs,
+  providerLabel,
+  maxRetries = 2,
+}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await axios.post(url, payload, { timeout: timeoutMs, headers });
+      return response.data;
+    } catch (err) {
+      const status = err?.response?.status;
+      const retryAfterHeader = err?.response?.headers?.["retry-after"];
+      const isRetryable =
+        status === 429 ||
+        (status >= 500 && status <= 599) ||
+        err?.code === "ECONNRESET" ||
+        err?.code === "ETIMEDOUT";
+
+      if (!isRetryable || attempt >= maxRetries) {
+        throw new Error(`${providerLabel} API error: ${formatAxiosError(err)}`);
+      }
+
+      let waitMs = 800 * Math.pow(2, attempt);
+      if (retryAfterHeader) {
+        const parsed = Number.parseFloat(String(retryAfterHeader));
+        if (Number.isFinite(parsed) && parsed > 0) {
+          waitMs = Math.min(30000, Math.max(waitMs, parsed * 1000));
+        }
+      }
+      await sleepMs(waitMs);
+    }
+  }
+  throw new Error(`${providerLabel} API error: retry loop exhausted`);
+}
+
+async function sendGroqChatMessage(
+  messages,
+  { maxTokens, temperature, tools = null, toolChoice = "auto", model = null } = {}
+) {
+  const data = await postChatCompletionsWithRetry({
+    url: `${groqBaseUrl}/chat/completions`,
+    payload: {
+      model: model || CHAT_MODELS.groq.model,
       messages,
       max_tokens: maxTokens,
       temperature,
+      ...(tools ? { tools, tool_choice: toolChoice } : {}),
     },
-    {
-      timeout: 45000,
+    headers: {
+      Authorization: `Bearer ${groqApiKey}`,
+      "Content-Type": "application/json",
+    },
+    timeoutMs: 45000,
+    providerLabel: "Groq",
+    maxRetries: 2,
+  });
+  return data?.choices?.[0]?.message || null;
+}
+
+async function sendHfRouterChatMessage(
+  messages,
+  { maxTokens, temperature, tools = null, toolChoice = "auto", model = null } = {}
+) {
+  try {
+    const data = await postChatCompletionsWithRetry({
+      url: `${hfRouterBaseUrl}/chat/completions`,
+      payload: {
+        model: model,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        ...(tools ? { tools, tool_choice: toolChoice } : {}),
+      },
+      headers: {
+        Authorization: `Bearer ${hfToken}`,
+        "Content-Type": "application/json",
+      },
+      timeoutMs: 60000,
+      providerLabel: "HF Router",
+      maxRetries: 2,
+    });
+    return data?.choices?.[0]?.message || null;
+  } catch (err) {
+    const msg = String(err?.message || err);
+    const permissionDenied =
+      msg.includes("HTTP 403") &&
+      (msg.toLowerCase().includes("inference providers") || msg.toLowerCase().includes("sufficient permissions"));
+    if (permissionDenied) {
+      hfChatPermissionDenied = true;
+      if (CHAT_MODELS?.hf) CHAT_MODELS.hf.enabled = false;
+      throw new Error(
+        'HF Router permission error (403): your token cannot call Inference Providers. Create a new Hugging Face access token with "Inference Providers" enabled, set it in HF_TOKEN, then restart the backend.'
+      );
+    }
+    throw err;
+  }
+}
+
+async function sendDinoChatMessage(messages, options) {
+  return sendHfRouterChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
+}
+
+async function sendGroqCompletion(messages, maxTokens, temperature, model = null) {
+  const msg = await sendGroqChatMessage(messages, { maxTokens, temperature, model });
+  return msg?.content || "";
+}
+
+let sambaNovaChatQueue = Promise.resolve();
+async function enqueueSambaNovaChat(task) {
+  const previous = sambaNovaChatQueue;
+  let release;
+  sambaNovaChatQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+async function sendSambaNovaCompletion(messages, maxTokens, temperature, model = null) {
+  return enqueueSambaNovaChat(async () => {
+    const data = await postChatCompletionsWithRetry({
+      url: `${sambaNovaBaseUrl}/chat/completions`,
+      payload: {
+        model: model || sambaNovaChatModel,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+      },
       headers: {
         Authorization: `Bearer ${sambaNovaApiKey}`,
         "Content-Type": "application/json",
       },
-    }
-  );
-  return response.data?.choices?.[0]?.message?.content || "";
+      timeoutMs: 45000,
+      providerLabel: "SambaNova",
+      maxRetries: 3,
+    });
+    return data?.choices?.[0]?.message?.content || "";
+  });
 }
 
 async function getAIReply(
@@ -1142,6 +1413,11 @@ async function getAIReply(
 ) {
   try {
     let systemContent = "You are a helpful assistant.";
+    const selectedModel = resolvePreferredChatModel(preferredModel);
+
+    if (selectedModel === "dino") {
+      systemContent = "You are Dino 1.0, an advanced NexaCore AI. You have powerful reasoning capabilities and access to indexed knowledge.";
+    }
 
     if (sessionAttachments.length > 0) {
       systemContent += "\n\nYou have access to the following files uploaded in this conversation:\n";
@@ -1182,25 +1458,14 @@ async function getAIReply(
 
     const messages = [
       { role: "system", content: systemContent },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
+      ...history.map((m) => ({ role: m.role, content: m.content || "" })),
     ];
 
     const maxTokens = webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
-    const selectedModel = resolvePreferredChatModel(preferredModel);
     const selectedConfig = CHAT_MODELS[selectedModel];
 
     if (!selectedConfig?.enabled) {
       return `Selected model "${selectedModel}" is not configured or unavailable. Please select another model and retry.`;
-    }
-
-    if (selectedModel === "sambanova") {
-      try {
-        const sambaReply = await sendSambaNovaCompletion(messages, maxTokens, 0.7);
-        return sambaReply || "No reply from AI";
-      } catch (err) {
-        console.warn("SambaNova chat failed:", err?.message || err);
-        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
-      }
     }
 
     if (selectedModel === "groq") {
@@ -1213,12 +1478,266 @@ async function getAIReply(
       }
     }
 
+    if (selectedModel === "hf") {
+      try {
+        const msg = await sendHfRouterChatMessage(messages, {
+          maxTokens,
+          temperature: 0.7,
+          tools: null,
+          toolChoice: "auto",
+          model: CHAT_MODELS.hf.model,
+        });
+        return msg?.content || "No reply from AI";
+      } catch (err) {
+        console.warn(`${selectedModel} chat failed:`, err?.message || err);
+        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
+      }
+    }
+
+    if (selectedModel === "dino") {
+      try {
+        const msg = await sendDinoChatMessage(messages, {
+          maxTokens,
+          temperature: 0.7,
+          tools: null,
+          toolChoice: "auto",
+        });
+        return msg?.content || "No reply from AI";
+      } catch (err) {
+        console.warn("Dino chat fallback failed:", err?.message || err);
+        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
+      }
+    }
+
     return `Selected model "${selectedModel}" is unsupported. Please choose a valid model.`;
   } catch (err) {
     console.error("Chat completion error:", err.message || err);
     return "AI is currently unavailable, your backend and DB are working :)";
   }
 }
+
+const DINO_AGENT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "search_rag",
+      description: "Search the knowledge base for information from uploaded files or previous deep searches in this session.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The specific search query to look for in the knowledge base.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "deep_search_web",
+      description: "Perform a live web search to find the latest information on a topic.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The search query for the web search." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "store_knowledge",
+      description: "Learn and store a durable insight into the long-term knowledge base.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short title." },
+          content: { type: "string", description: "The knowledge to store." },
+          tags: { type: "array", items: { type: "string" } },
+        },
+        required: ["title", "content"],
+      },
+    },
+  },
+];
+
+async function runDinoAgentLoop(userId, sessionId, historyMessages, userQuery, deepSearchWebFn) {
+  let iterations = 0;
+
+  const conversationHistory = (historyMessages || []).map((m) => ({
+    role: m.role,
+    content: m.content || "",
+  }));
+
+  const systemMessage = {
+    role: "system",
+    content: `You are Dino 1.0, an autonomous Web-Connected Agent.
+
+Core loop: Think -> Act -> Observe -> Finalize.
+
+Rules:
+1. Use 'deep_search_web' for any question that could benefit from up-to-date info.
+2. Use 'search_rag' to ground answers in stored sources and uploaded files when relevant.
+3. Use 'store_knowledge' to save durable insights learned from the web or reasoning.`,
+  };
+
+  if (conversationHistory[0]?.role !== "system") {
+    conversationHistory.unshift(systemMessage);
+  }
+
+  if (dinoAlwaysWeb) {
+    const preSources = await deepSearchWebFn(String(userQuery || "").trim());
+    if (preSources && preSources.length > 0) {
+      try {
+        await indexWebSourcesForRag(userId, sessionId, preSources);
+      } catch (err) {
+        console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+      }
+      const sourceLines = preSources
+        .slice(0, deepSearchMaxResults)
+        .map(
+          (s) =>
+            `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
+              .replace(/\\s+/g, " ")
+              .trim()
+              .slice(0, deepSearchSnippetChars)}`
+        )
+        .join("\n");
+      conversationHistory.splice(1, 0, {
+        role: "system",
+        content: `Web sources pre-fetched for grounding:\n${sourceLines}\n\nPrefer citing these or using deep_search_web for more.`,
+      });
+    }
+  }
+
+  while (iterations < dinoAgentMaxIterations) {
+    iterations += 1;
+
+    const assistantMessage = await sendDinoChatMessage(conversationHistory, {
+      maxTokens: aiDeepSearchMaxTokens,
+      temperature: 0.5,
+      tools: DINO_AGENT_TOOLS,
+      toolChoice: "auto",
+    });
+
+    if (!assistantMessage) {
+      throw new Error("Dino LLM returned no message.");
+    }
+
+    conversationHistory.push(assistantMessage);
+
+    if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+      return assistantMessage.content || "";
+    }
+
+    for (const toolCall of assistantMessage.tool_calls) {
+      const { name, arguments: argsString } = toolCall.function;
+      let args;
+      try {
+        args = JSON.parse(argsString);
+      } catch (_) {
+        conversationHistory.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          name,
+          content: "Error: Invalid JSON arguments.",
+        });
+        continue;
+      }
+
+      let result = "";
+      try {
+        if (name === "search_rag") {
+          const ragResult = await buildRagContext(userId, sessionId, args.query, 8);
+          result = ragResult.context || "No relevant information found in the knowledge base.";
+        } else if (name === "deep_search_web") {
+          const sources = await deepSearchWebFn(args.query);
+          if (sources && sources.length > 0) {
+            await indexWebSourcesForRag(userId, sessionId, sources);
+            result = sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n");
+          } else {
+            result = "No results found on the web.";
+          }
+        } else if (name === "store_knowledge") {
+          const source = await knowledgeSourceModel.createInsight(userId, sessionId, args.title, args.content, {
+            tags: args.tags || [],
+            learned_from_interaction: true,
+            agent: "Dino 1.0",
+          });
+          const chunks = [
+            {
+              chunk_index: 0,
+              content: args.content,
+              token_count: String(args.content || "").split(/\\s+/).filter(Boolean).length,
+              metadata: { title: args.title },
+            },
+          ];
+          await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+          result = `Stored: "${args.title}".`;
+        } else {
+          result = `Unknown tool: ${name}`;
+        }
+      } catch (err) {
+        result = `Error executing ${name}: ${err.message}`;
+      }
+
+      conversationHistory.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        name,
+        content: String(result),
+      });
+    }
+  }
+
+  return "I reached my reasoning limit without a final answer.";
+}
+
+async function runDinoAgentLearning(userId, sessionId, userMessage, assistantReply) {
+  try {
+    const learningPrompt = `You are Dino 1.0. Extract durable reusable knowledge from the interaction.
+
+If there is valuable reusable info, call store_knowledge. Otherwise, do nothing.
+
+User: "${userMessage}"
+Assistant: "${assistantReply}"`;
+
+    const message = await sendDinoChatMessage([{ role: "system", content: learningPrompt }], {
+      maxTokens: 900,
+      temperature: 0.3,
+      tools: DINO_AGENT_TOOLS,
+      toolChoice: "auto",
+    });
+
+    if (!message?.tool_calls) return;
+    for (const toolCall of message.tool_calls) {
+      if (toolCall.function.name !== "store_knowledge") continue;
+      const args = JSON.parse(toolCall.function.arguments);
+      const source = await knowledgeSourceModel.createInsight(userId, sessionId, args.title, args.content, {
+        tags: args.tags || [],
+        learned_from_interaction: true,
+        agent: "Dino 1.0",
+      });
+      const chunks = [
+        {
+          chunk_index: 0,
+          content: args.content,
+          token_count: String(args.content || "").split(/\\s+/).filter(Boolean).length,
+          metadata: { title: args.title },
+        },
+      ];
+      await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+    }
+  } catch (err) {
+    console.error("[Dino Learning] Failed:", err?.message || err);
+  }
+}
+
 function resolveAttachmentDiskPath(attachment) {
   if (!attachment) return null;
   const candidates = [];
@@ -1287,6 +1806,9 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/models", (req, res) => {
+  if (CHAT_MODELS?.hf) {
+    CHAT_MODELS.hf.enabled = Boolean(hfToken) && !hfChatPermissionDenied;
+  }
   const models = Object.values(CHAT_MODELS).map((item) => ({
     id: item.id,
     label: item.label,
@@ -1388,7 +1910,7 @@ app.get("/api/messages", authMiddleware, async (req, res) => {
 
 app.post("/api/messages", authMiddleware, async (req, res) => {
   try {
-    const { sessionId, content, attachmentIds, deepSearch, thinking, model } = req.body;
+    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode } = req.body;
     const parsedSessionId = Number.parseInt(sessionId, 10);
     if (!Number.isInteger(parsedSessionId)) {
       return res.status(400).json({ error: "Valid sessionId required" });
@@ -1440,6 +1962,73 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
+    } else if (resolvePreferredChatModel(model) === "dino") {
+      console.log(`[Message Route] Dino Agent. Model: ${model}, Thinking: ${thinking}`);
+      const history = await messageModel.getBySessionId(parsedSessionId);
+      const selectedModel = resolvePreferredChatModel(model);
+
+      if (!CHAT_MODELS.dino.enabled) {
+        const assistantRecord = await messageModel.create(
+          parsedSessionId,
+          "assistant",
+          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          selectedModel
+        );
+        void assistantRecord;
+      } else {
+        let aiReply = "";
+        if (!agentMode && !thinking) {
+          const sources = deepSearch ? await deepSearchWeb(content) : [];
+          if (sources.length > 0) {
+            try {
+              await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
+            } catch (indexErr) {
+              console.error("Web RAG indexing failed:", indexErr?.message || indexErr);
+            }
+          }
+          const crossChatContext = shouldReviewAcrossChats(content)
+            ? await getCrossChatContext(req.user.id, parsedSessionId)
+            : "";
+          const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6);
+          const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false);
+        } else {
+          try {
+            aiReply = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb);
+          } catch (err) {
+            console.error("[Message Route] Dino agent failed:", err?.message || err);
+            const sources = await deepSearchWeb(content);
+            if (sources.length > 0) {
+              try {
+                await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
+              } catch (indexErr) {
+                console.error("Web RAG indexing failed:", indexErr?.message || indexErr);
+              }
+            }
+            const crossChatContext = shouldReviewAcrossChats(content)
+              ? await getCrossChatContext(req.user.id, parsedSessionId)
+              : "";
+            const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, 8);
+            const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking);
+          }
+        }
+
+        const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
+        const assistantRecord = await messageModel.create(
+          parsedSessionId,
+          "assistant",
+          codeExport.content,
+          selectedModel
+        );
+        for (const attachment of codeExport.attachments) {
+          await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+        }
+
+        if (agentMode && dinoSelfLearningEnabled) {
+          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply).catch(console.error);
+        }
+      }
     } else {
       const history = await messageModel.getBySessionId(parsedSessionId);
       const sources = deepSearch ? await deepSearchWeb(content) : [];
@@ -1456,6 +2045,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch || thinking ? 8 : 6);
       const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
       let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
+
       if (sources.length > 0) {
         const links = sources
           .map((s) => `- [${s.title}](${s.url})`)
@@ -1653,7 +2243,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
     }
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const model = String(req.body?.model || "hf").trim().toLowerCase();
     const thinking = !!req.body?.thinking;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!token) return res.status(400).json({ error: "Share token required" });
@@ -1682,7 +2272,7 @@ app.post("/api/public/chat", async (req, res) => {
       return res.status(403).json({ error: "Public chat is disabled for logged-in sessions" });
     }
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const model = String(req.body?.model || "hf").trim().toLowerCase();
     const thinking = !!req.body?.thinking;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!content) return res.status(400).json({ error: "Message content is required" });
@@ -1704,7 +2294,7 @@ app.post("/api/public/chat", async (req, res) => {
 app.put("/api/messages/:id", authMiddleware, async (req, res) => {
   try {
     const messageId = Number.parseInt(req.params.id, 10);
-    const { content, deepSearch, rewriteThread, thinking, model } = req.body || {};
+    const { content, deepSearch, rewriteThread, thinking, model, agentMode } = req.body || {};
     if (!Number.isInteger(messageId) || !content || !String(content).trim()) {
       return res.status(400).json({ error: "Valid message id and content are required" });
     }
@@ -1762,6 +2352,73 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
+    } else if (resolvePreferredChatModel(model) === "dino") {
+      console.log(`[Edit Message Route] Dino Agent. Model: ${model}, Thinking: ${thinking}`);
+      const history = await messageModel.getBySessionId(targetMessage.session_id);
+      const selectedModel = resolvePreferredChatModel(model);
+
+      if (!CHAT_MODELS.dino.enabled) {
+        const assistantRecord = await messageModel.create(
+          targetMessage.session_id,
+          "assistant",
+          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          selectedModel
+        );
+        void assistantRecord;
+      } else {
+        let aiReply = "";
+        if (!agentMode && !thinking) {
+          const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
+          if (sources.length > 0) {
+            try {
+              await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
+            } catch (indexErr) {
+              console.error("Web RAG indexing failed during edit:", indexErr?.message || indexErr);
+            }
+          }
+          const crossChatContext = shouldReviewAcrossChats(normalizedContent)
+            ? await getCrossChatContext(req.user.id, targetMessage.session_id)
+            : "";
+          const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, deepSearch ? 8 : 6);
+          const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false);
+        } else {
+          try {
+            aiReply = await runDinoAgentLoop(req.user.id, targetMessage.session_id, history, normalizedContent, deepSearchWeb);
+          } catch (err) {
+            console.error("[Edit Message Route] Dino agent failed:", err?.message || err);
+            const sources = await deepSearchWeb(normalizedContent);
+            if (sources.length > 0) {
+              try {
+                await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
+              } catch (indexErr) {
+                console.error("Web RAG indexing failed during edit:", indexErr?.message || indexErr);
+              }
+            }
+            const crossChatContext = shouldReviewAcrossChats(normalizedContent)
+              ? await getCrossChatContext(req.user.id, targetMessage.session_id)
+              : "";
+            const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, 8);
+            const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking);
+          }
+        }
+
+        const codeExport = await offloadLargeCodeBlocksToFiles(targetMessage.session_id, normalizedContent, aiReply, 100);
+        const assistantRecord = await messageModel.create(
+          targetMessage.session_id,
+          "assistant",
+          codeExport.content,
+          selectedModel
+        );
+        for (const attachment of codeExport.attachments) {
+          await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+        }
+
+        if (agentMode && dinoSelfLearningEnabled) {
+          runDinoAgentLearning(req.user.id, targetMessage.session_id, normalizedContent, aiReply).catch(console.error);
+        }
+      }
     } else {
       const history = await messageModel.getBySessionId(targetMessage.session_id);
       const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
@@ -1783,6 +2440,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       );
       const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
       let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
+
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
         aiReply += `\n\nSources:\n${links}`;

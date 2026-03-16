@@ -5,7 +5,7 @@ import nexacoreLogo from "./assets/nexacore-logo.svg";
 import "./App.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
-const ANONYMOUS_DEFAULT_MODEL = "sambanova";
+const ANONYMOUS_DEFAULT_MODEL = "hf";
 const LANDING_TITLES = [
   "What can I help with?",
   "How can I support you today?",
@@ -120,6 +120,8 @@ export default function App() {
   const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
   const [availableModels, setAvailableModels] = useState([
     { id: "groq", label: "Groq (Llama 3.3 70B)", enabled: true },
+    { id: "dino", label: "Dino 1.0 (Web-Connected Agent)", enabled: true },
+    { id: "hf", label: "Hugging Face (hf-inference)", enabled: true },
   ]);
   const [selectedModel, setSelectedModel] = useState(localStorage.getItem("chatModel") || "groq");
   const [attachedFiles, setAttachedFiles] = useState([]);
@@ -167,6 +169,7 @@ export default function App() {
   const inputTextareaRef = useRef(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [agentModeEnabled, setAgentModeEnabled] = useState(localStorage.getItem("agentModeEnabled") === "true");
   const [processSteps, setProcessSteps] = useState([]);
   const [processStepIndex, setProcessStepIndex] = useState(0);
   const [voiceState, setVoiceState] = useState("idle");
@@ -203,13 +206,13 @@ export default function App() {
   const showTemporaryChatToggle = token && !shareToken && !selectedSession;
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
-    : "SambaNova (Anonymous)";
+    : "Hugging Face (Anonymous)";
   const getModelLabel = (modelId, fallback = null) => {
     const normalized = String(modelId || fallback || "").trim().toLowerCase();
     if (!normalized) return "";
     if (normalized === "generation_pipeline") return "Generation Pipeline";
-    if (normalized === "sambanova") return "SambaNova";
-    if (normalized === "groq") return "Groq";
+    if (normalized === "hf") return "Hugging Face";
+    if (normalized === "dino") return "Dino 1.0";
     return availableModels.find((m) => m.id === normalized)?.label || normalized;
   };
   const renderSender = (msg, fallbackModel = null) => (
@@ -360,6 +363,10 @@ export default function App() {
   }, [selectedModel]);
 
   useEffect(() => {
+    localStorage.setItem("agentModeEnabled", agentModeEnabled);
+  }, [agentModeEnabled]);
+
+  useEffect(() => {
     localStorage.setItem("pinnedSessionIds", JSON.stringify(pinnedSessionIds));
   }, [pinnedSessionIds]);
 
@@ -419,6 +426,9 @@ export default function App() {
     const prompt = String(text || "").toLowerCase();
     if (options.editing) {
       return ["Updating message...", "Rebuilding answer...", "Finalizing edit..."];
+    }
+    if (options.agentMode) {
+      return ["Initializing agent...", "Reasoning step-by-step...", "Using tools...", "Finalizing insight..."];
     }
     if (options.deepSearch) {
       return ["Searching sources...", "Reading pages...", "Building cited answer..."];
@@ -1734,6 +1744,7 @@ export default function App() {
       editing: !!editingMessageId,
       deepSearch: deepSearchEnabled,
       thinking: thinkingEnabled,
+      agentMode: agentModeEnabled,
       hasFiles: attachedFiles.length > 0,
     }));
     setProcessStepIndex(0);
@@ -1755,6 +1766,7 @@ export default function App() {
           content: text,
           deepSearch: deepSearchEnabled,
           thinking: thinkingEnabled,
+          agentMode: agentModeEnabled,
           rewriteThread: true,
           model: activeModel,
         }, { signal: requestController.signal });
@@ -1882,6 +1894,7 @@ export default function App() {
         content: text,
         deepSearch: deepSearchEnabled,
         thinking: thinkingEnabled,
+        agentMode: agentModeEnabled,
         model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
       }, { signal: requestController.signal });
@@ -2884,19 +2897,56 @@ export default function App() {
                 </button>
                 {token && openFloatingModelMenu && (
                   <div className="floating-menu floating-model-menu">
-                    {availableModels.map((model) => (
-                      <button
-                        key={model.id}
-                        className={model.id === selectedModel ? "active" : ""}
-                        onClick={() => {
-                          setSelectedModel(model.id);
-                          setOpenFloatingModelMenu(false);
-                        }}
-                        title={model.label}
-                      >
-                        {model.label}
-                      </button>
-                    ))}
+                    {!agentModeEnabled ? (
+                      availableModels.map((model) => (
+                        <button
+                          key={model.id}
+                          className={model.id === selectedModel ? "active" : ""}
+                          onClick={() => {
+                            setSelectedModel(model.id);
+                            setOpenFloatingModelMenu(false);
+                          }}
+                          title={model.label}
+                        >
+                          {model.label}
+                        </button>
+                      ))
+                    ) : (
+                      <>
+                        <div className="menu-group-label">Agents</div>
+                        {availableModels
+                          .filter(m => m.id === 'dino')
+                          .map((model) => (
+                            <button
+                              key={model.id}
+                              className={model.id === selectedModel ? "active" : ""}
+                              onClick={() => {
+                                setSelectedModel(model.id);
+                                setOpenFloatingModelMenu(false);
+                              }}
+                              title={model.label}
+                            >
+                              {model.label}
+                            </button>
+                          ))}
+                        <div className="menu-group-label">Standard Models</div>
+                        {availableModels
+                          .filter(m => m.id !== 'dino')
+                          .map((model) => (
+                            <button
+                              key={model.id}
+                              className={model.id === selectedModel ? "active" : ""}
+                              onClick={() => {
+                                setSelectedModel(model.id);
+                                setOpenFloatingModelMenu(false);
+                              }}
+                              title={model.label}
+                            >
+                              {model.label}
+                            </button>
+                          ))}
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2974,7 +3024,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "hf")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -2997,7 +3047,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "hf")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3011,7 +3061,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "hf")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3121,30 +3171,35 @@ export default function App() {
                   </button>
                 </div>
               )}
-              {(thinkingEnabled || deepSearchEnabled || attachedFiles.length > 0) && (
-                <div className="composer-active-row">
-                  {thinkingEnabled && (
-                    <button className="composer-active-pill" onClick={() => setThinkingEnabled(false)}>
-                      Thinking On <span className="composer-active-close">x</span>
-                    </button>
-                  )}
-                  {deepSearchEnabled && (
-                    <button className="composer-active-pill" onClick={() => setDeepSearchEnabled(false)}>
-                      Deep research On <span className="composer-active-close">x</span>
-                    </button>
-                  )}
-                  {attachedFiles.length > 0 && (
-                    <button
-                      className="composer-active-pill"
-                      onClick={() => {
-                        clearAttachedFilesState();
-                      }}
-                    >
-                      Files selected ({attachedFiles.length}) <span className="composer-active-close">x</span>
-                    </button>
-                  )}
-                </div>
-              )}
+              <div className="composer-active-row">
+                {thinkingEnabled && (
+                  <button className="composer-active-pill" onClick={() => setThinkingEnabled(false)}>
+                    Thinking On <span className="composer-active-close">x</span>
+                  </button>
+                )}
+                <button
+                  className={`composer-active-pill agent-status-pill ${agentModeEnabled ? "active" : "inactive"}`}
+                  onClick={() => setAgentModeEnabled(!agentModeEnabled)}
+                  title={`Turn Agent Mode ${agentModeEnabled ? "OFF" : "ON"}`}
+                >
+                  Dino 1.0: {agentModeEnabled ? "ON" : "OFF"}
+                </button>
+                {deepSearchEnabled && (
+                  <button className="composer-active-pill" onClick={() => setDeepSearchEnabled(false)}>
+                    Deep research On <span className="composer-active-close">x</span>
+                  </button>
+                )}
+                {attachedFiles.length > 0 && (
+                  <button
+                    className="composer-active-pill"
+                    onClick={() => {
+                      clearAttachedFilesState();
+                    }}
+                  >
+                    Files selected ({attachedFiles.length}) <span className="composer-active-close">x</span>
+                  </button>
+                )}
+              </div>
               {editingMessageId && (
                 <div className="edit-banner">
                   Editing previous message
@@ -3268,11 +3323,30 @@ export default function App() {
                       </button>
                       <div className="composer-menu-divider" />
                       <button
+                        className={agentModeEnabled ? "active" : ""}
+                        onClick={() => {
+                          setAgentModeEnabled((prev) => {
+                            const next = !prev;
+                            if (next) {
+                              setThinkingEnabled(false);
+                              setDeepSearchEnabled(false);
+                            }
+                            return next;
+                          });
+                          setComposerMenuOpen(false);
+                        }}
+                      >
+                        {agentModeEnabled ? "Dino 1.0 (Agent Mode) On" : "Enable Agent Mode (Dino 1.0)"}
+                      </button>
+                      <button
                         className={thinkingEnabled ? "active" : ""}
                         onClick={() => {
                           setThinkingEnabled((prev) => {
                             const next = !prev;
-                            if (next) setDeepSearchEnabled(false);
+                            if (next) {
+                              setDeepSearchEnabled(false);
+                              setAgentModeEnabled(false);
+                            }
                             return next;
                           });
                           setComposerMenuOpen(false);
@@ -3285,7 +3359,10 @@ export default function App() {
                         onClick={() => {
                           setDeepSearchEnabled((prev) => {
                             const next = !prev;
-                            if (next) setThinkingEnabled(false);
+                            if (next) {
+                              setThinkingEnabled(false);
+                              setAgentModeEnabled(false);
+                            }
                             return next;
                           });
                           setComposerMenuOpen(false);
@@ -3334,6 +3411,26 @@ export default function App() {
                 >
                   <span className="send-btn-icon" aria-hidden="true">{sendButtonIcon}</span>
                 </button>
+
+                <div className="composer-footer">
+                  <button
+                    className={`agent-toggle-btn-ext ${agentModeEnabled ? "active" : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAgentModeEnabled((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          setThinkingEnabled(false);
+                          setDeepSearchEnabled(false);
+                        }
+                        return next;
+                      });
+                    }}
+                    title={agentModeEnabled ? "Dino 1.0 Agent On" : "Dino 1.0 Agent Off"}
+                  >
+                    <span className="agent-toggle-icon">🦕</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -3590,4 +3687,3 @@ export default function App() {
     </div>
   );
 }
-

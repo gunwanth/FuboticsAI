@@ -60,6 +60,16 @@ const knowledgeSourceModel = {
     );
     return inserted.rows[0];
   },
+
+  async createInsight(userId, sessionId, title, content, metadata = {}) {
+    const result = await db.query(
+      `INSERT INTO knowledge_sources (user_id, session_id, source_type, title, metadata, status)
+       VALUES ($1, $2, 'insight', $3, $4, 'ready')
+       RETURNING *`,
+      [userId, sessionId, title, JSON.stringify(metadata || {})]
+    );
+    return result.rows[0];
+  },
 };
 
 module.exports = knowledgeSourceModel;
