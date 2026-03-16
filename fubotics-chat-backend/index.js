@@ -309,19 +309,19 @@ const extractionMaxChars = Math.min(
 const CHAT_MODELS = {
   groq: {
     id: "groq",
-    label: "Groq (Llama 3.3 70B)",
+    label: "groq",
     enabled: Boolean(groqApiKey),
     model: groqChatModel,
   },
   hf: {
     id: "hf",
-    label: "Hugging Face (hf-inference)",
+    label: "HF_1.0.1",
     enabled: Boolean(hfToken),
     model: hfChatModel,
   },
   dino: {
     id: "dino",
-    label: "Dino 1.0 (Web-Connected Agent)",
+    label: "Dino_1.0",
     enabled: Boolean(hfToken),
     model: dinoAgentModel,
   },
