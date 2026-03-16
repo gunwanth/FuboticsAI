@@ -2244,7 +2244,8 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "hf").trim().toLowerCase();
-    const thinking = !!req.body?.thinking;
+    // Anonymous chat: do not allow "Thinking mode" before login.
+    const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!token) return res.status(400).json({ error: "Share token required" });
     if (!content) return res.status(400).json({ error: "Message content is required" });
@@ -2266,6 +2267,29 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
   }
 });
 
+// Logged-in "incognito" chat: authenticated, but does not persist messages to DB.
+app.post("/api/incognito/chat", authMiddleware, async (req, res) => {
+  try {
+    const content = String(req.body?.content || "").trim();
+    const model = String(req.body?.model || "hf").trim().toLowerCase();
+    const thinking = !!req.body?.thinking;
+    const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    if (!content) return res.status(400).json({ error: "Message content is required" });
+
+    const sanitizedHistory = history
+      .filter((m) => m && (m.role === "user" || m.role === "assistant" || m.role === "system"))
+      .map((m) => ({ role: m.role, content: String(m.content || "").slice(0, 12000) }))
+      .slice(-30);
+    sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
+
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model, thinking);
+    res.json({ assistant });
+  } catch (err) {
+    console.error("POST /api/incognito/chat error:", err);
+    res.status(500).json({ error: "Failed to process incognito chat message" });
+  }
+});
+
 app.post("/api/public/chat", async (req, res) => {
   try {
     if (req.headers.authorization) {
@@ -2273,7 +2297,8 @@ app.post("/api/public/chat", async (req, res) => {
     }
     const content = String(req.body?.content || "").trim();
     const model = String(req.body?.model || "hf").trim().toLowerCase();
-    const thinking = !!req.body?.thinking;
+    // Anonymous chat: do not allow "Thinking mode" before login.
+    const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!content) return res.status(400).json({ error: "Message content is required" });
 

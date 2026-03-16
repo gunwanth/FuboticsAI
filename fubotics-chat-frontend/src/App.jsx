@@ -204,6 +204,7 @@ export default function App() {
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
   const showFloatingSessionMenu = token && !shareToken && !!selectedSession;
   const showTemporaryChatToggle = token && !shareToken && !selectedSession;
+  const canUseThinking = !!token;
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
     : "HF_1.0.1 (Anonymous)";
@@ -365,6 +366,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("agentModeEnabled", agentModeEnabled);
   }, [agentModeEnabled]);
+
+  useEffect(() => {
+    // Thinking mode is only available for logged-in users.
+    if (!canUseThinking) setThinkingEnabled(false);
+  }, [canUseThinking]);
 
   useEffect(() => {
     localStorage.setItem("pinnedSessionIds", JSON.stringify(pinnedSessionIds));
@@ -1743,7 +1749,7 @@ export default function App() {
     setProcessSteps(inferProcessSteps(text, {
       editing: !!editingMessageId,
       deepSearch: deepSearchEnabled,
-      thinking: thinkingEnabled,
+      thinking: canUseThinking && thinkingEnabled,
       agentMode: agentModeEnabled,
       hasFiles: attachedFiles.length > 0,
     }));
@@ -1765,7 +1771,7 @@ export default function App() {
         const res = await axios.put(`${API_BASE}/api/messages/${editIdRaw}`, {
           content: text,
           deepSearch: deepSearchEnabled,
-          thinking: thinkingEnabled,
+          thinking: canUseThinking && thinkingEnabled,
           agentMode: agentModeEnabled,
           rewriteThread: true,
           model: activeModel,
@@ -1828,7 +1834,7 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/share/${shareToken}/chat`, {
           content: text,
           history: historyForApi,
-          thinking: thinkingEnabled,
+          thinking: false,
           model: ANONYMOUS_DEFAULT_MODEL,
         }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
@@ -1852,7 +1858,7 @@ export default function App() {
         const res = await axios.post(`${API_BASE}/api/public/chat`, {
           content: text,
           history: historyForApi,
-          thinking: thinkingEnabled,
+          thinking: false,
           model: ANONYMOUS_DEFAULT_MODEL,
         }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
@@ -1873,15 +1879,12 @@ export default function App() {
           role: m.role,
           content: m.content,
         }));
-        const res = await axios.post(`${API_BASE}/api/public/chat`, {
+        const res = await axios.post(`${API_BASE}/api/incognito/chat`, {
           content: text,
           history: historyForApi,
-          thinking: thinkingEnabled,
+          thinking: canUseThinking && thinkingEnabled,
           model: activeModel,
-        }, {
-          signal: requestController.signal,
-          skipAuth: true,
-        });
+        }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setIncognitoMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
         setInput("");
@@ -1893,7 +1896,7 @@ export default function App() {
         sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
-        thinking: thinkingEnabled,
+        thinking: canUseThinking && thinkingEnabled,
         agentMode: agentModeEnabled,
         model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
@@ -3172,7 +3175,7 @@ export default function App() {
                 </div>
               )}
               <div className="composer-active-row">
-                {thinkingEnabled && (
+                {canUseThinking && thinkingEnabled && (
                   <button className="composer-active-pill" onClick={() => setThinkingEnabled(false)}>
                     Thinking On <span className="composer-active-close">x</span>
                   </button>
@@ -3351,6 +3354,7 @@ export default function App() {
                           });
                           setComposerMenuOpen(false);
                         }}
+                        disabled={!canUseThinking}
                       >
                         {thinkingEnabled ? "Thinking On" : "Thinking"}
                       </button>
