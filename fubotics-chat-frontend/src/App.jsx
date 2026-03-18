@@ -103,6 +103,23 @@ axios.interceptors.response.use(
         isRefreshing = false;
       }
     }
+
+    // Any other 401 means the access token is missing/invalid (wrong JWT secret, revoked token, etc.).
+    // Clear local auth state so the UI doesn't stay stuck in a "logged-in but unauthorized" loop.
+    if (error.response?.status === 401 && !originalRequest?.skipAuth) {
+      const url = String(originalRequest?.url || "");
+      const isAuthEndpoint =
+        url.includes("/api/login") ||
+        url.includes("/api/signup") ||
+        url.includes("/api/refresh") ||
+        url.includes("/api/forgot-password");
+      // Do not auto-logout for invalid-credential login attempts, only for protected API calls.
+      if (!isAuthEndpoint) {
+        localStorage.removeItem("accessToken");
+        delete axios.defaults.headers.common["Authorization"];
+        broadcastLogout();
+      }
+    }
     
     return Promise.reject(error);
   }
@@ -1810,7 +1827,15 @@ export default function App() {
       }
     }
 
-    if (!finalPayload) throw new Error("Stream ended without final payload.");
+    if (!finalPayload) {
+      if (signal?.aborted) {
+        const e = new Error("canceled");
+        e.name = "AbortError";
+        throw e;
+      }
+      // Most commonly: auth got cleared mid-stream or the connection dropped.
+      throw new Error("Stream disconnected before completion. If this keeps happening, login again and retry.");
+    }
     return finalPayload;
   }
 
