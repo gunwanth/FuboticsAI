@@ -1357,6 +1357,98 @@ async function sendHfRouterChatMessage(
   }
 }
 
+function initSse(res) {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+}
+
+function sseSend(res, event, data) {
+  if (event) res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+async function streamOpenAICompatibleChatCompletions({
+  url,
+  payload,
+  headers,
+  timeoutMs,
+  providerLabel,
+  onDelta,
+  signal,
+}) {
+  const response = await axios.post(url, payload, {
+    headers,
+    timeout: timeoutMs,
+    responseType: "stream",
+    validateStatus: () => true,
+    signal,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    // Try to read a bit of the body for debugging.
+    let detail = "";
+    try {
+      const chunks = [];
+      for await (const chunk of response.data) {
+        chunks.push(Buffer.from(chunk));
+        if (Buffer.concat(chunks).length > 64 * 1024) break;
+      }
+      detail = Buffer.concat(chunks).toString("utf8");
+    } catch (_) {
+      // ignore
+    }
+    throw new Error(`${providerLabel} API error: HTTP ${response.status}${detail ? ` | ${detail}` : ""}`);
+  }
+
+  return await new Promise((resolve, reject) => {
+    let buffer = "";
+    let fullText = "";
+
+    function processLine(rawLine) {
+      const line = String(rawLine || "").trim();
+      if (!line) return;
+      if (!line.startsWith("data:")) return;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") return;
+      let json;
+      try {
+        json = JSON.parse(data);
+      } catch (_) {
+        return;
+      }
+      const delta = json?.choices?.[0]?.delta?.content || "";
+      if (delta) {
+        fullText += delta;
+        try {
+          onDelta(delta);
+        } catch (_) {
+          // ignore callback errors
+        }
+      }
+    }
+
+    response.data.on("data", (chunk) => {
+      buffer += Buffer.from(chunk).toString("utf8");
+      // SSE is line-based. Split on \n, keep remainder in buffer.
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() || "";
+      for (const line of parts) processLine(line);
+    });
+
+    response.data.on("end", () => {
+      // Process any last partial line.
+      if (buffer) processLine(buffer);
+      resolve(fullText);
+    });
+
+    response.data.on("error", (err) => reject(err));
+  });
+}
+
 async function sendDinoChatMessage(messages, options) {
   return sendHfRouterChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
 }
@@ -1905,6 +1997,338 @@ app.get("/api/messages", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("GET /api/messages error:", err);
     res.status(500).json({ error: "Failed to fetch messages" });
+  }
+});
+
+app.post("/api/messages/stream", authMiddleware, async (req, res) => {
+  initSse(res);
+
+  const abortController = new AbortController();
+  req.on("close", () => abortController.abort());
+
+  try {
+    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode } = req.body || {};
+    const parsedSessionId = Number.parseInt(sessionId, 10);
+    if (!Number.isInteger(parsedSessionId)) {
+      sseSend(res, "error", { error: "Valid sessionId required" });
+      return res.end();
+    }
+    if (!content || !String(content).trim()) {
+      sseSend(res, "error", { error: "Message content is required" });
+      return res.end();
+    }
+
+    const session = await chatSessionModel.getById(parsedSessionId, req.user.id);
+    if (!session) {
+      sseSend(res, "error", { error: "Unauthorized to access this session" });
+      return res.end();
+    }
+
+    const sessionAttachments = await attachmentModel.getBySessionId(parsedSessionId);
+    const created = await messageModel.create(parsedSessionId, "user", content);
+
+    if (attachmentIds && Array.isArray(attachmentIds)) {
+      for (const attId of attachmentIds) {
+        await attachmentModel.linkToMessage(created.id, attId);
+      }
+    }
+
+    const generationType = detectGenerationRequest(content);
+    if (generationType) {
+      let generatedAttachment = null;
+      let generationError = null;
+      try {
+        const historyForGeneration = await messageModel.getBySessionId(parsedSessionId);
+        const conversationContext = buildHistoryContext(historyForGeneration);
+        if (generationType === "image") {
+          generatedAttachment = await generateImageFile(parsedSessionId, content);
+        } else if (generationType === "ppt") {
+          generatedAttachment = await generatePptFile(parsedSessionId, content, conversationContext);
+        } else if (generationType === "pdf") {
+          generatedAttachment = await generatePdfFile(parsedSessionId, content, conversationContext);
+        } else if (generationType === "notes") {
+          generatedAttachment = await generateNotesFile(parsedSessionId, content, conversationContext);
+        } else if (generationType === "document") {
+          generatedAttachment = await generateDocumentFile(parsedSessionId, content, conversationContext);
+        }
+      } catch (err) {
+        generationError = err;
+        console.error(`Generation failed for type ${generationType}:`, err.message);
+      }
+
+      const assistantMsg = generatedAttachment
+        ? `Generated ${generationType.toUpperCase()} successfully: ${generatedAttachment.original_filename}`
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+      const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg, "generation_pipeline");
+      if (generatedAttachment) await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
+
+      const messages = await messageModel.getBySessionId(parsedSessionId);
+      sseSend(res, "final", { messages });
+      return res.end();
+    }
+
+    const selectedModelId = resolvePreferredChatModel(model);
+
+    // Dino selected: stream only the "non-agent" path; agent loop returns a final answer (sent as one chunk).
+    if (selectedModelId === "dino") {
+      if (!CHAT_MODELS.dino.enabled) {
+        await messageModel.create(
+          parsedSessionId,
+          "assistant",
+          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          selectedModelId
+        );
+        const messages = await messageModel.getBySessionId(parsedSessionId);
+        sseSend(res, "final", { messages });
+        return res.end();
+      }
+
+      const history = await messageModel.getBySessionId(parsedSessionId);
+      let aiReply = "";
+
+      if (!agentMode && !thinking) {
+        const sources = deepSearch ? await deepSearchWeb(content) : [];
+        if (sources.length > 0) {
+          try {
+            await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
+          } catch (indexErr) {
+            console.error("Web RAG indexing failed:", indexErr?.message || indexErr);
+          }
+        }
+        const crossChatContext = shouldReviewAcrossChats(content)
+          ? await getCrossChatContext(req.user.id, parsedSessionId)
+          : "";
+        const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6);
+        const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+
+        // Build the exact same prompt as getAIReply() would, but stream the completion.
+        let systemContent =
+          "You are Dino 1.0, an advanced NexaCore AI. You have powerful reasoning capabilities and access to indexed knowledge.";
+        if (sessionAttachments.length > 0) {
+          systemContent += "\n\nYou have access to the following files uploaded in this conversation:\n";
+          for (const att of sessionAttachments) {
+            systemContent += `\n- ${att.original_filename} (${att.file_type})`;
+            if (att.analysis_result) {
+              try {
+                const analysis = JSON.parse(att.analysis_result);
+                const insight = renderAttachmentInsight(analysis);
+                if (insight) systemContent += `\n  ${insight}`;
+              } catch (e) {
+                systemContent += `\n  ${att.analysis_result}`;
+              }
+            }
+          }
+          systemContent += "\n\nWhen users ask about these files, reference the information provided above.";
+          systemContent += "\nIf an uploaded file is an image, its visual analysis has already been performed by the system.";
+          systemContent += "\nDo not say you cannot view, inspect, or analyze the image.";
+          systemContent += "\nUse the provided image subject, likely type, colors, background, visible text, and extracted visual summary as the authoritative visual evidence.";
+        }
+        if (sources.length > 0) {
+          systemContent += "\n\nDeep web research sources were collected for this answer. Cite them when useful:\n";
+          for (const source of sources.slice(0, deepSearchMaxResults)) {
+            const safeSnippet = String(source.snippet || "")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, deepSearchSnippetChars);
+            systemContent += `\n- ${source.title} (${source.url})\n  Snippet: ${safeSnippet}`;
+          }
+          systemContent += "\n\nUse these sources to provide a research-focused response with factual caution.";
+        }
+        if (combinedContext && combinedContext.trim()) {
+          systemContent += `\n\nAdditional context from other chats:\n${combinedContext.trim()}`;
+          systemContent += "\n\nUse it only if relevant to the current user request.";
+        }
+
+        const messagesForModel = [
+          { role: "system", content: systemContent },
+          ...history.map((m) => ({ role: m.role, content: m.content || "" })),
+        ];
+
+        const maxTokens = sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
+        aiReply = await streamOpenAICompatibleChatCompletions({
+          url: `${hfRouterBaseUrl}/chat/completions`,
+          payload: {
+            model: CHAT_MODELS.dino.model,
+            messages: messagesForModel,
+            max_tokens: maxTokens,
+            temperature: 0.7,
+            stream: true,
+          },
+          headers: {
+            Authorization: `Bearer ${hfToken}`,
+            "Content-Type": "application/json",
+          },
+          timeoutMs: 60000,
+          providerLabel: "HF Router (Dino)",
+          onDelta: (delta) => sseSend(res, "delta", { delta }),
+          signal: abortController.signal,
+        });
+      } else {
+        aiReply = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb);
+        if (aiReply) sseSend(res, "delta", { delta: aiReply });
+
+        if (agentMode && dinoSelfLearningEnabled) {
+          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply).catch(console.error);
+        }
+      }
+
+      const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
+      const assistantRecord = await messageModel.create(parsedSessionId, "assistant", codeExport.content, selectedModelId);
+      for (const attachment of codeExport.attachments) {
+        await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+      }
+
+      const messages = await messageModel.getBySessionId(parsedSessionId);
+      sseSend(res, "final", { messages });
+      return res.end();
+    }
+
+    // Standard models stream path (groq/hf).
+    const history = await messageModel.getBySessionId(parsedSessionId);
+    const sources = deepSearch ? await deepSearchWeb(content) : [];
+    if (sources.length > 0) {
+      try {
+        await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
+      } catch (err) {
+        console.error("Web RAG indexing failed:", err?.message || err);
+      }
+    }
+    const crossChatContext = shouldReviewAcrossChats(content)
+      ? await getCrossChatContext(req.user.id, parsedSessionId)
+      : "";
+    const ragContextResult = await buildRagContext(
+      req.user.id,
+      parsedSessionId,
+      content,
+      deepSearch || thinking ? 8 : 6
+    );
+    const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
+
+    let systemContent = "You are a helpful assistant.";
+    if (sessionAttachments.length > 0) {
+      systemContent += "\n\nYou have access to the following files uploaded in this conversation:\n";
+      for (const att of sessionAttachments) {
+        systemContent += `\n- ${att.original_filename} (${att.file_type})`;
+        if (att.analysis_result) {
+          try {
+            const analysis = JSON.parse(att.analysis_result);
+            const insight = renderAttachmentInsight(analysis);
+            if (insight) systemContent += `\n  ${insight}`;
+          } catch (e) {
+            systemContent += `\n  ${att.analysis_result}`;
+          }
+        }
+      }
+      systemContent += "\n\nWhen users ask about these files, reference the information provided above.";
+      systemContent += "\nIf an uploaded file is an image, its visual analysis has already been performed by the system.";
+      systemContent += "\nDo not say you cannot view, inspect, or analyze the image.";
+      systemContent += "\nUse the provided image subject, likely type, colors, background, visible text, and extracted visual summary as the authoritative visual evidence.";
+    }
+    if (sources.length > 0) {
+      systemContent += "\n\nDeep web research sources were collected for this answer. Cite them when useful:\n";
+      for (const source of sources.slice(0, deepSearchMaxResults)) {
+        const safeSnippet = String(source.snippet || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, deepSearchSnippetChars);
+        systemContent += `\n- ${source.title} (${source.url})\n  Snippet: ${safeSnippet}`;
+      }
+      systemContent += "\n\nUse these sources to provide a research-focused response with factual caution.";
+    }
+    if (combinedContext && combinedContext.trim()) {
+      systemContent += `\n\nAdditional context from other chats:\n${combinedContext.trim()}`;
+      systemContent += "\n\nUse it only if relevant to the current user request.";
+    }
+    if (thinking) {
+      systemContent +=
+        "\n\nThinking mode is ON. Think deeply, reason step-by-step internally, and provide a clear, well-structured answer.";
+    }
+
+    const messagesForModel = [
+      { role: "system", content: systemContent },
+      ...history.map((m) => ({ role: m.role, content: m.content || "" })),
+    ];
+
+    const maxTokens = sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
+    let aiReply = "";
+
+    if (selectedModelId === "groq") {
+      aiReply = await streamOpenAICompatibleChatCompletions({
+        url: `${groqBaseUrl}/chat/completions`,
+        payload: {
+          model: CHAT_MODELS.groq.model,
+          messages: messagesForModel,
+          max_tokens: maxTokens,
+          temperature: 0.7,
+          stream: true,
+        },
+        headers: {
+          Authorization: `Bearer ${groqApiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeoutMs: 45000,
+        providerLabel: "Groq",
+        onDelta: (delta) => sseSend(res, "delta", { delta }),
+        signal: abortController.signal,
+      });
+    } else {
+      // Default to HF standard model for this stream route.
+      aiReply = await streamOpenAICompatibleChatCompletions({
+        url: `${hfRouterBaseUrl}/chat/completions`,
+        payload: {
+          model: CHAT_MODELS.hf.model,
+          messages: messagesForModel,
+          max_tokens: maxTokens,
+          temperature: 0.7,
+          stream: true,
+        },
+        headers: {
+          Authorization: `Bearer ${hfToken}`,
+          "Content-Type": "application/json",
+        },
+        timeoutMs: 60000,
+        providerLabel: "HF Router",
+        onDelta: (delta) => sseSend(res, "delta", { delta }),
+        signal: abortController.signal,
+      });
+    }
+
+    if (sources.length > 0) {
+      const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
+      aiReply += `\n\nSources:\n${links}`;
+    }
+    if (ragContextResult.citations.length > 0) {
+      const ragLinks = ragContextResult.citations
+        .map((item) => {
+          const title = item.sourceUrl ? `[${item.title}](${item.sourceUrl})` : item.title;
+          return `- [RAG ${item.ref}] ${title} (${item.sourceType}, chunk ${item.chunkIndex + 1})`;
+        })
+        .join("\n");
+      aiReply += `\n\nKnowledge Base References:\n${ragLinks}`;
+    }
+
+    const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
+    const assistantRecord = await messageModel.create(
+      parsedSessionId,
+      "assistant",
+      codeExport.content,
+      selectedModelId
+    );
+    for (const attachment of codeExport.attachments) {
+      await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+    }
+
+    const messages = await messageModel.getBySessionId(parsedSessionId);
+    sseSend(res, "final", { messages });
+    return res.end();
+  } catch (err) {
+    console.error("POST /api/messages/stream error:", err);
+    try {
+      sseSend(res, "error", { error: err?.message || "Failed to stream message" });
+    } catch (_) {
+      // ignore
+    }
+    return res.end();
   }
 });
 

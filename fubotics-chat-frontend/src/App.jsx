@@ -1687,6 +1687,74 @@ export default function App() {
     }
   }
 
+  async function postMessagesStream(payload, { onDelta, signal } = {}) {
+    const res = await fetch(`${API_BASE}/api/messages/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload || {}),
+      signal,
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(detail || `Stream failed (HTTP ${res.status})`);
+    }
+    if (!res.body || typeof res.body.getReader !== "function") {
+      throw new Error("Streaming is not supported in this browser.");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalPayload = null;
+
+    const processFrame = (frame) => {
+      const lines = String(frame || "").split(/\r?\n/);
+      let eventName = "message";
+      let dataStr = "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim() || "message";
+        } else if (line.startsWith("data:")) {
+          dataStr += line.slice(5).trim();
+        }
+      }
+      if (!dataStr) return;
+      let data;
+      try {
+        data = JSON.parse(dataStr);
+      } catch {
+        return;
+      }
+      if (eventName === "delta") {
+        const delta = String(data?.delta || "");
+        if (delta && typeof onDelta === "function") onDelta(delta);
+      } else if (eventName === "final") {
+        finalPayload = data;
+      } else if (eventName === "error") {
+        throw new Error(String(data?.error || "Stream error"));
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        processFrame(frame);
+      }
+    }
+
+    if (!finalPayload) throw new Error("Stream ended without final payload.");
+    return finalPayload;
+  }
+
   async function handleSend(options = null) {
     if (speechRecognitionRef.current) {
       voiceShouldContinueRef.current = false;
@@ -1804,6 +1872,7 @@ export default function App() {
       setComposerCodeDraft(null);
     }
     let optimisticTempId = null;
+    let optimisticAssistantTempId = null;
 
     // Optimistic UI
     const tempMsg = {
@@ -1892,20 +1961,42 @@ export default function App() {
       }
 
       const targetSessionId = await ensureSessionForMessage(text);
-      const res = await axios.post(`${API_BASE}/api/messages`, {
+      optimisticAssistantTempId = `temp-assistant-${Date.now()}`;
+      setMessages((prev) => [
+        ...prev,
+        { id: optimisticAssistantTempId, isTemporary: true, role: "assistant", content: "" },
+      ]);
+
+      const streamed = await postMessagesStream({
         sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
         thinking: canUseThinking && thinkingEnabled,
         agentMode: agentModeEnabled,
         model: activeModel,
-        attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined
-      }, { signal: requestController.signal });
-      setMessages(res.data.messages || []);
+        attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined,
+      }, {
+        signal: requestController.signal,
+        onDelta: (delta) => {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (String(m.id) !== String(optimisticAssistantTempId)) return m;
+              return { ...m, content: String(m.content || "") + delta };
+            })
+          );
+        },
+      });
+
+      if (streamed?.messages) {
+        setMessages(streamed.messages);
+      }
     } catch (err) {
       if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError") {
         if (optimisticTempId) {
           setMessages((prev) => prev.filter((m) => String(m.id) !== String(optimisticTempId)));
+        }
+        if (optimisticAssistantTempId) {
+          setMessages((prev) => prev.filter((m) => String(m.id) !== String(optimisticAssistantTempId)));
         }
         if (codeDraftToSend) {
           setComposerCodeDraft(codeDraftToSend);
