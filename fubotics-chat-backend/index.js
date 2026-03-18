@@ -2322,6 +2322,15 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
     sseSend(res, "final", { messages });
     return res.end();
   } catch (err) {
+    // Client disconnected or aborted: treat as normal shutdown (don't emit noisy SSE errors).
+    if (abortController.signal.aborted) {
+      return res.end();
+    }
+    const msg = String(err?.message || err);
+    if (msg.toLowerCase().includes("canceled") || msg.toLowerCase().includes("cancelled")) {
+      return res.end();
+    }
+
     console.error("POST /api/messages/stream error:", err);
     try {
       sseSend(res, "error", { error: err?.message || "Failed to stream message" });

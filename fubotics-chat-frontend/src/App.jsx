@@ -24,6 +24,14 @@ axios.defaults.withCredentials = true;
 let isRefreshing = false;
 let failedQueue = [];
 
+function broadcastLogout() {
+  try {
+    window.dispatchEvent(new CustomEvent("auth:logout"));
+  } catch (_) {
+    // ignore
+  }
+}
+
 const processQueue = (error, token = null) => {
   failedQueue.forEach(prom => {
     if (error) {
@@ -88,7 +96,8 @@ axios.interceptors.response.use(
         processQueue(refreshError, null);
         // If refresh fails, logout user
         localStorage.removeItem("accessToken");
-        window.location.reload();
+        delete axios.defaults.headers.common["Authorization"];
+        broadcastLogout();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
@@ -335,6 +344,19 @@ export default function App() {
     };
 
     bootstrapAuth();
+  }, []);
+
+  useEffect(() => {
+    const onLogout = () => {
+      setToken(null);
+      setCurrentUser(null);
+      setSelectedSessionId(null);
+      setSessions([]);
+      setMessages([]);
+      setIncognitoMessages([]);
+    };
+    window.addEventListener("auth:logout", onLogout);
+    return () => window.removeEventListener("auth:logout", onLogout);
   }, []);
 
   useEffect(() => {
@@ -1688,15 +1710,47 @@ export default function App() {
   }
 
   async function postMessagesStream(payload, { onDelta, signal } = {}) {
-    const res = await fetch(`${API_BASE}/api/messages/stream`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(payload || {}),
-      signal,
-    });
+    const sendOnce = async (accessToken) => {
+      return await fetch(`${API_BASE}/api/messages/stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(payload || {}),
+        signal,
+      });
+    };
+
+    const liveToken = localStorage.getItem("accessToken") || token;
+    let res = await sendOnce(liveToken);
+
+    // Streaming uses fetch, so it bypasses axios refresh interceptors. Retry once on expired token.
+    if (res.status === 401) {
+      let body = "";
+      try {
+        body = await res.text();
+      } catch (_) {
+        // ignore
+      }
+      const looksExpired = body.includes("TOKEN_EXPIRED") || body.toLowerCase().includes("token expired");
+      if (looksExpired) {
+        try {
+          const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true, skipAuth: true });
+          const refreshedToken = response.data?.accessToken;
+          if (!refreshedToken) throw new Error("No accessToken in refresh response");
+          localStorage.setItem("accessToken", refreshedToken);
+          setToken(refreshedToken);
+          axios.defaults.headers.common["Authorization"] = `Bearer ${refreshedToken}`;
+          res = await sendOnce(refreshedToken);
+        } catch (err) {
+          localStorage.removeItem("accessToken");
+          delete axios.defaults.headers.common["Authorization"];
+          broadcastLogout();
+          throw err;
+        }
+      }
+    }
 
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
@@ -1735,7 +1789,12 @@ export default function App() {
       } else if (eventName === "final") {
         finalPayload = data;
       } else if (eventName === "error") {
-        throw new Error(String(data?.error || "Stream error"));
+        const msg = String(data?.error || "Stream error");
+        // If the user canceled the request, don't surface a noisy error.
+        if (signal?.aborted && (msg.toLowerCase().includes("canceled") || msg.toLowerCase().includes("cancelled"))) {
+          return;
+        }
+        throw new Error(msg);
       }
     };
 
