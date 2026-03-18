@@ -1252,6 +1252,31 @@ function formatAxiosError(err) {
   return parts.filter(Boolean).join(" | ") || "request error";
 }
 
+function redactAuthHeaderValue(value) {
+  const v = String(value || "");
+  if (!v) return v;
+  if (v.length <= 18) return "[REDACTED]";
+  return `${v.slice(0, 8)}...[REDACTED]...${v.slice(-6)}`;
+}
+
+function sanitizeAxiosErrorForLog(err) {
+  const status = err?.response?.status;
+  const code = err?.code;
+  const url = err?.config?.url;
+  const method = err?.config?.method;
+  const headers = err?.config?.headers ? { ...err.config.headers } : {};
+  if (headers.Authorization) headers.Authorization = redactAuthHeaderValue(headers.Authorization);
+  if (headers.authorization) headers.authorization = redactAuthHeaderValue(headers.authorization);
+  return {
+    message: String(err?.message || err),
+    status,
+    code,
+    method,
+    url,
+    headers,
+  };
+}
+
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2331,7 +2356,18 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
       return res.end();
     }
 
-    console.error("POST /api/messages/stream error:", err);
+    const isAxiosCanceled =
+      err?.code === "ERR_CANCELED" ||
+      err?.name === "CanceledError" ||
+      err?.name === "AbortError" ||
+      String(err?.message || "").toLowerCase().includes("canceled") ||
+      String(err?.message || "").toLowerCase().includes("cancelled");
+    if (isAxiosCanceled) {
+      // If upstream request was canceled due to client disconnect, don't log noisy stack traces.
+      return res.end();
+    }
+
+    console.error("POST /api/messages/stream error:", sanitizeAxiosErrorForLog(err));
     try {
       sseSend(res, "error", { error: err?.message || "Failed to stream message" });
     } catch (_) {
