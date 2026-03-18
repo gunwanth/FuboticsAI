@@ -33,6 +33,9 @@ const knowledgeChunkModel = require("./models/knowledgeChunk");
 const { createImageGenerationService } = require("./services/imageGenerationService");
 
 const app = express();
+// API responses are user/session specific; disable ETag to avoid 304 responses with empty bodies
+// which can collapse frontend state (especially for attachments/messages lists).
+app.set("etag", false);
 const PORT = process.env.PORT || 5000;
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
 const PUBLIC_IMAGE_SHARE_EXPIRY = process.env.PUBLIC_IMAGE_SHARE_EXPIRY || "30d";
@@ -41,6 +44,8 @@ app.set("trust proxy", 1);
 // ---------- CORS (dynamic allowlist) ----------
 const defaultOrigins = [
   "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://0.0.0.0:5173",
   "https://nexacore-ai.vercel.app",
   "https://www.nexacore-ai.vercel.app",
   "https://fuboticsai.onrender.com"
@@ -60,8 +65,31 @@ const ALLOWED_ORIGINS = Array.from(
   new Set([...envList, ...defaultOrigins].map(normalizeOrigin).filter(Boolean))
 );
 
+const isDevCors =
+  String(process.env.NODE_ENV || "").toLowerCase() !== "production" &&
+  String(process.env.ALLOW_DEV_CORS || "true").toLowerCase() === "true";
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (ALLOWED_ORIGINS.includes(normalizedOrigin)) return true;
+  if (!isDevCors) return false;
+  // Allow local dev ports (Vite may bump 5173 -> 5174, etc.).
+  return /^http:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0):\d+$/i.test(normalizedOrigin);
+}
+
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
+
+// Prevent browser/proxy caching for API JSON routes.
+app.use((req, res, next) => {
+  if (String(req.path || "").startsWith("/api/")) {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+  next();
+});
 
 // Cookie parser for refresh tokens
 app.use(cookieParser());
@@ -112,9 +140,7 @@ const chatUpload = multer({
 // CORS middleware
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (ALLOWED_ORIGINS.includes(normalizedOrigin)) return callback(null, true);
+    if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error("CORS origin denied: " + origin));
   },
   methods: ["GET", "POST", "PUT", "OPTIONS", "DELETE"],
@@ -125,9 +151,9 @@ app.use(cors({
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") {
     const origin = req.headers.origin || "";
-    const normalizedOrigin = normalizeOrigin(origin);
-    if (!origin || ALLOWED_ORIGINS.includes(normalizedOrigin)) {
-      res.header("Access-Control-Allow-Origin", origin || "*");
+    if (isAllowedOrigin(origin)) {
+      // When credentials are used, ACAO must be the concrete origin (not *).
+      res.header("Access-Control-Allow-Origin", origin || "null");
       res.header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS,DELETE");
       res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
       res.header("Access-Control-Allow-Credentials", "true");
@@ -258,7 +284,8 @@ const groqApiKey = process.env.GROQ_API_KEY || null;
 const groqBaseUrl = (process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1").replace(/\/+$/, "");
 const groqChatModel = process.env.GROQ_CHAT_MODEL || "llama-3.3-70b-versatile";
 const dinoSelfLearningEnabled = String(process.env.DINO_SELF_LEARNING || "true").toLowerCase() === "true";
-const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "true").toLowerCase() === "true";
+// Keep Dino fast by default. Turn this on only if you want every Dino agent run to prefetch web sources.
+const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "false").toLowerCase() === "true";
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
 const hfRouterBaseUrl = (process.env.HF_ROUTER_BASE_URL || "https://router.huggingface.co/v1").replace(/\/+$/, "");
 const hfChatModel = process.env.HF_CHAT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
@@ -266,7 +293,7 @@ const dinoAgentModel = process.env.DINO_AGENT_MODEL || "katanemo/Arch-Router-1.5
 let hfChatPermissionDenied = false;
 const dinoAgentMaxIterations = Math.min(
   8,
-  Math.max(1, Number.parseInt(process.env.DINO_AGENT_MAX_ITERATIONS || "5", 10))
+  Math.max(1, Number.parseInt(process.env.DINO_AGENT_MAX_ITERATIONS || "3", 10))
 );
 const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
 const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
@@ -433,23 +460,26 @@ const imageGenerationService = createImageGenerationService({
 });
 const deepSearchMaxResults = Math.min(
   12,
-  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_MAX_RESULTS || "6", 10))
+  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_MAX_RESULTS || "4", 10))
 );
 const deepSearchFetchConcurrency = Math.min(
   6,
-  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_FETCH_CONCURRENCY || "3", 10))
+  Math.max(1, Number.parseInt(process.env.DEEP_SEARCH_FETCH_CONCURRENCY || "2", 10))
 );
 const deepSearchSnippetChars = Math.min(
   1800,
-  Math.max(300, Number.parseInt(process.env.DEEP_SEARCH_SNIPPET_CHARS || "900", 10))
+  Math.max(300, Number.parseInt(process.env.DEEP_SEARCH_SNIPPET_CHARS || "700", 10))
 );
+// When false (default), deep search returns DuckDuckGo snippets only (fast).
+// When true, it also fetches each result URL to extract paragraphs (slower, more accurate context).
+const deepSearchFetchPages = String(process.env.DEEP_SEARCH_FETCH_PAGES || "false").toLowerCase() === "true";
 const deepSearchSearchTimeoutMs = Math.min(
   20000,
-  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_SEARCH_TIMEOUT_MS || "12000", 10))
+  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_SEARCH_TIMEOUT_MS || "9000", 10))
 );
 const deepSearchPageTimeoutMs = Math.min(
   20000,
-  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_PAGE_TIMEOUT_MS || "10000", 10))
+  Math.max(5000, Number.parseInt(process.env.DEEP_SEARCH_PAGE_TIMEOUT_MS || "8000", 10))
 );
 const aiDefaultMaxTokens = Math.min(
   4096,
@@ -754,12 +784,24 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
     });
     const $ = cheerio.load(data);
     const rawResults = [];
-    $("a.result__a").each((_, el) => {
-      const title = $(el).text().trim();
-      const href = $(el).attr("href");
+    // Prefer per-result blocks so we can capture the DDG snippet without fetching pages.
+    $(".result").each((_, el) => {
+      const a = $(el).find("a.result__a").first();
+      const title = a.text().trim();
+      const href = a.attr("href");
       const normalized = normalizeResultUrl(href);
-      if (title && normalized) rawResults.push({ title, url: normalized });
+      const snippet = $(el).find(".result__snippet").text().trim();
+      if (title && normalized) rawResults.push({ title, url: normalized, snippet });
     });
+    if (rawResults.length === 0) {
+      // Fallback selector if the markup changes.
+      $("a.result__a").each((_, el) => {
+        const title = $(el).text().trim();
+        const href = $(el).attr("href");
+        const normalized = normalizeResultUrl(href);
+        if (title && normalized) rawResults.push({ title, url: normalized, snippet: "" });
+      });
+    }
 
     const unique = [];
     const seenDomainCount = new Map();
@@ -782,6 +824,15 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
       if (unique.length >= targetResults * 2) break;
     }
 
+    if (!deepSearchFetchPages) {
+      return unique.slice(0, targetResults).map((item) => ({
+        title: item.title,
+        url: item.url,
+        snippet: (item.snippet || "").replace(/\s+/g, " ").trim().substring(0, deepSearchSnippetChars) ||
+          "No extractable snippet.",
+      }));
+    }
+
     const fetchSourceSnippet = async (item) => {
       try {
         const page = await axios.get(item.url, {
@@ -802,13 +853,14 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
         return {
           title: item.title,
           url: item.url,
-          snippet: content || "No extractable content.",
+          snippet: content || (item.snippet || "").replace(/\s+/g, " ").trim().substring(0, deepSearchSnippetChars) || "No extractable content.",
         };
       } catch (_) {
         return {
           title: item.title,
           url: item.url,
-          snippet: "Source fetched but content extraction failed.",
+          snippet: (item.snippet || "").replace(/\s+/g, " ").trim().substring(0, deepSearchSnippetChars) ||
+            "Source fetched but content extraction failed.",
         };
       }
     };
@@ -1355,7 +1407,12 @@ async function sendHfRouterChatMessage(
         messages,
         max_tokens: maxTokens,
         temperature,
-        ...(tools ? { tools, tool_choice: toolChoice } : {}),
+        ...(tools
+          ? {
+              tools,
+              ...(toolChoice ? { tool_choice: toolChoice } : {}),
+            }
+          : {}),
       },
       headers: {
         Authorization: `Bearer ${hfToken}`,
@@ -1470,8 +1527,24 @@ async function streamOpenAICompatibleChatCompletions({
       resolve(fullText);
     });
 
-    response.data.on("error", (err) => reject(err));
+    response.data.on("error", (err) => {
+      // Preserve partial output so callers can persist it and still return a response.
+      try {
+        err.partialText = fullText;
+      } catch (_) {
+        // ignore
+      }
+      reject(err);
+    });
   });
+}
+
+function isAutoToolChoiceUnsupportedError(err) {
+  const msg = String(err?.message || err || "");
+  // vLLM OpenAI server: "auto tool choice requires --enable-auto-tool-choice and --tool-call-parser"
+  return msg.toLowerCase().includes("auto") &&
+    msg.toLowerCase().includes("tool choice") &&
+    msg.toLowerCase().includes("enable-auto-tool-choice");
 }
 
 async function sendDinoChatMessage(messages, options) {
@@ -1683,7 +1756,168 @@ const DINO_AGENT_TOOLS = [
   },
 ];
 
-async function runDinoAgentLoop(userId, sessionId, historyMessages, userQuery, deepSearchWebFn) {
+function extractFirstJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch (_) {
+    // ignore
+  }
+
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = raw.slice(start, end + 1);
+    try {
+      const parsed = JSON.parse(slice);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch (_) {
+      // ignore
+    }
+  }
+  return null;
+}
+
+async function runDinoAgentLoopManual(userId, sessionId, historyMessages, userQuery, deepSearchWebFn) {
+  let iterations = 0;
+
+  const conversationHistory = (historyMessages || []).map((m) => ({
+    role: m.role,
+    content: m.content || "",
+  }));
+
+  const systemMessage = {
+    role: "system",
+    content: `You are Dino 1.0, an autonomous Web-Connected Agent.
+
+You do NOT have native tool-calling support. You must follow this JSON protocol exactly (no markdown, no extra text):
+
+If you need a tool:
+{"action":"tool","name":"deep_search_web","arguments":{"query":"..."}} OR
+{"action":"tool","name":"search_rag","arguments":{"query":"..."}} OR
+{"action":"tool","name":"store_knowledge","arguments":{"title":"...","content":"...","tags":["..."]}}
+
+If you are ready to answer:
+{"action":"final","content":"...final answer..."}
+
+Rules:
+1. Use deep_search_web for up-to-date info.
+2. Use search_rag for uploaded files or stored knowledge.
+3. Use store_knowledge only for durable reusable insights (no secrets).`,
+  };
+
+  if (conversationHistory[0]?.role !== "system") {
+    conversationHistory.unshift(systemMessage);
+  } else {
+    conversationHistory[0] = systemMessage;
+  }
+
+  if (dinoAlwaysWeb) {
+    const preSources = await deepSearchWebFn(String(userQuery || "").trim());
+    if (preSources && preSources.length > 0) {
+      try {
+        await indexWebSourcesForRag(userId, sessionId, preSources);
+      } catch (err) {
+        console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+      }
+      const sourceLines = preSources
+        .slice(0, deepSearchMaxResults)
+        .map(
+          (s) =>
+            `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
+              .replace(/\\s+/g, " ")
+              .trim()
+              .slice(0, deepSearchSnippetChars)}`
+        )
+        .join("\n");
+      conversationHistory.splice(1, 0, {
+        role: "system",
+        content: `Web sources pre-fetched for grounding:\n${sourceLines}\n\nPrefer these; you can call deep_search_web for more.`,
+      });
+    }
+  }
+
+  conversationHistory.push({ role: "user", content: String(userQuery || "").slice(0, 12000) });
+
+  while (iterations < dinoAgentMaxIterations) {
+    iterations += 1;
+
+    const assistantMessage = await sendDinoChatMessage(conversationHistory, {
+      maxTokens: aiDeepSearchMaxTokens,
+      temperature: 0.4,
+      tools: null,
+      toolChoice: null,
+    });
+
+    const content = String(assistantMessage?.content || "").trim();
+    const parsed = extractFirstJsonObject(content);
+    if (!parsed) return content;
+
+    const action = String(parsed.action || "").toLowerCase();
+    if (action === "final") return String(parsed.content || "");
+    if (action !== "tool") return content;
+
+    const name = String(parsed.name || "").trim();
+    const args = parsed.arguments && typeof parsed.arguments === "object" ? parsed.arguments : {};
+    let result = "";
+
+    try {
+      if (name === "search_rag") {
+        const ragResult = await buildRagContext(userId, sessionId, String(args.query || ""), 8);
+        result = ragResult.context || "No relevant information found in the knowledge base.";
+      } else if (name === "deep_search_web") {
+        const sources = await deepSearchWebFn(String(args.query || ""));
+        if (sources && sources.length > 0) {
+          await indexWebSourcesForRag(userId, sessionId, sources);
+          result = sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n");
+        } else {
+          result = "No results found on the web.";
+        }
+      } else if (name === "store_knowledge") {
+        const title = String(args.title || "Insight").slice(0, 200);
+        const body = String(args.content || "").slice(0, 20000);
+        const source = await knowledgeSourceModel.createInsight(userId, sessionId, title, body, {
+          tags: Array.isArray(args.tags) ? args.tags.map((t) => String(t)) : [],
+          learned_from_interaction: true,
+          agent: "Dino 1.0",
+        });
+        const chunks = [
+          {
+            chunk_index: 0,
+            content: body,
+            token_count: body.split(/\\s+/).filter(Boolean).length,
+            metadata: { title },
+          },
+        ];
+        await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+        result = `Stored: "${title}".`;
+      } else {
+        result = `Unknown tool: ${name}`;
+      }
+    } catch (err) {
+      result = `Error executing ${name}: ${err.message}`;
+    }
+
+    conversationHistory.push({
+      role: "system",
+      content: `Tool result (${name}):\n${String(result || "").slice(0, 12000)}`,
+    });
+  }
+
+  return "I could not finish within the agent iteration limit. Please refine the question.";
+}
+
+async function runDinoAgentLoop(
+  userId,
+  sessionId,
+  historyMessages,
+  userQuery,
+  deepSearchWebFn,
+  { returnTranscript = false } = {}
+) {
   let iterations = 0;
 
   const conversationHistory = (historyMessages || []).map((m) => ({
@@ -1735,12 +1969,20 @@ Rules:
   while (iterations < dinoAgentMaxIterations) {
     iterations += 1;
 
-    const assistantMessage = await sendDinoChatMessage(conversationHistory, {
-      maxTokens: aiDeepSearchMaxTokens,
-      temperature: 0.5,
-      tools: DINO_AGENT_TOOLS,
-      toolChoice: "auto",
-    });
+    let assistantMessage;
+    try {
+      assistantMessage = await sendDinoChatMessage(conversationHistory, {
+        maxTokens: aiDeepSearchMaxTokens,
+        temperature: 0.5,
+        tools: DINO_AGENT_TOOLS,
+        toolChoice: "auto",
+      });
+    } catch (err) {
+      if (isAutoToolChoiceUnsupportedError(err)) {
+        return await runDinoAgentLoopManual(userId, sessionId, historyMessages, userQuery, deepSearchWebFn);
+      }
+      throw err;
+    }
 
     if (!assistantMessage) {
       throw new Error("Dino LLM returned no message.");
@@ -1749,6 +1991,12 @@ Rules:
     conversationHistory.push(assistantMessage);
 
     if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+      if (returnTranscript) {
+        return {
+          finalDraft: assistantMessage.content || "",
+          conversationHistory,
+        };
+      }
       return assistantMessage.content || "";
     }
 
@@ -1812,6 +2060,12 @@ Rules:
     }
   }
 
+  if (returnTranscript) {
+    return {
+      finalDraft: "I reached my reasoning limit without a final answer.",
+      conversationHistory,
+    };
+  }
   return "I reached my reasoning limit without a final answer.";
 }
 
@@ -1819,37 +2073,52 @@ async function runDinoAgentLearning(userId, sessionId, userMessage, assistantRep
   try {
     const learningPrompt = `You are Dino 1.0. Extract durable reusable knowledge from the interaction.
 
-If there is valuable reusable info, call store_knowledge. Otherwise, do nothing.
+Return ONLY valid JSON. No markdown, no extra text.
 
-User: "${userMessage}"
-Assistant: "${assistantReply}"`;
+If there is valuable reusable knowledge, return:
+{"title":"...","content":"...","tags":["optional","tags"]}
+
+If there is nothing worth storing, return:
+null
+
+Constraints:
+- Do not store secrets, tokens, passwords, or private personal data.
+- Prefer short reusable procedures, architecture notes, or stable facts.
+
+User: "${String(userMessage || "").slice(0, 2000)}"
+Assistant: "${String(assistantReply || "").slice(0, 6000)}"`;
 
     const message = await sendDinoChatMessage([{ role: "system", content: learningPrompt }], {
       maxTokens: 900,
-      temperature: 0.3,
-      tools: DINO_AGENT_TOOLS,
-      toolChoice: "auto",
+      temperature: 0.2,
+      tools: null,
+      toolChoice: null,
     });
 
-    if (!message?.tool_calls) return;
-    for (const toolCall of message.tool_calls) {
-      if (toolCall.function.name !== "store_knowledge") continue;
-      const args = JSON.parse(toolCall.function.arguments);
-      const source = await knowledgeSourceModel.createInsight(userId, sessionId, args.title, args.content, {
-        tags: args.tags || [],
-        learned_from_interaction: true,
-        agent: "Dino 1.0",
-      });
-      const chunks = [
-        {
-          chunk_index: 0,
-          content: args.content,
-          token_count: String(args.content || "").split(/\\s+/).filter(Boolean).length,
-          metadata: { title: args.title },
-        },
-      ];
-      await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
-    }
+    const parsed = extractFirstJsonObject(message?.content || "");
+    if (!parsed) return;
+    const title = String(parsed.title || "").trim();
+    const content = String(parsed.content || "").trim();
+    if (!title || !content) return;
+
+    const tags = Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t)).slice(0, 12) : [];
+    const safeTitle = title.slice(0, 200);
+    const safeContent = content.slice(0, 20000);
+
+    const source = await knowledgeSourceModel.createInsight(userId, sessionId, safeTitle, safeContent, {
+      tags,
+      learned_from_interaction: true,
+      agent: "Dino 1.0",
+    });
+    const chunks = [
+      {
+        chunk_index: 0,
+        content: safeContent,
+        token_count: safeContent.split(/\\s+/).filter(Boolean).length,
+        metadata: { title: safeTitle },
+      },
+    ];
+    await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
   } catch (err) {
     console.error("[Dino Learning] Failed:", err?.message || err);
   }
@@ -2031,6 +2300,17 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
   const abortController = new AbortController();
   req.on("close", () => abortController.abort());
 
+  // Heartbeat keeps SSE alive when the first token is slow (common with Dino agent loop).
+  // Frontend can ignore these events.
+  sseSend(res, "status", { state: "started" });
+  const heartbeat = setInterval(() => {
+    try {
+      sseSend(res, "ping", { t: Date.now() });
+    } catch (_) {
+      // ignore
+    }
+  }, 15000);
+
   try {
     const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode } = req.body || {};
     const parsedSessionId = Number.parseInt(sessionId, 10);
@@ -2170,27 +2450,117 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         ];
 
         const maxTokens = sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
-        aiReply = await streamOpenAICompatibleChatCompletions({
-          url: `${hfRouterBaseUrl}/chat/completions`,
-          payload: {
-            model: CHAT_MODELS.dino.model,
-            messages: messagesForModel,
-            max_tokens: maxTokens,
-            temperature: 0.7,
-            stream: true,
-          },
-          headers: {
-            Authorization: `Bearer ${hfToken}`,
-            "Content-Type": "application/json",
-          },
-          timeoutMs: 60000,
-          providerLabel: "HF Router (Dino)",
-          onDelta: (delta) => sseSend(res, "delta", { delta }),
-          signal: abortController.signal,
-        });
+        let streamedAny = false;
+        try {
+          aiReply = await streamOpenAICompatibleChatCompletions({
+            url: `${hfRouterBaseUrl}/chat/completions`,
+            payload: {
+              model: CHAT_MODELS.dino.model,
+              messages: messagesForModel,
+              max_tokens: maxTokens,
+              temperature: 0.7,
+              stream: true,
+            },
+            headers: {
+              Authorization: `Bearer ${hfToken}`,
+              "Content-Type": "application/json",
+            },
+            timeoutMs: 60000,
+            providerLabel: "HF Router (Dino)",
+            onDelta: (delta) => {
+              streamedAny = true;
+              sseSend(res, "delta", { delta });
+            },
+            signal: abortController.signal,
+          });
+        } catch (err) {
+          const partial = String(err?.partialText || "");
+          if (partial) {
+            aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
+          } else if (!streamedAny) {
+            // Fallback to non-stream completion so the user still gets an answer.
+            const msg = await sendHfRouterChatMessage(messagesForModel, {
+              maxTokens,
+              temperature: 0.7,
+              model: CHAT_MODELS.dino.model,
+            });
+            aiReply = msg?.content || "";
+            if (aiReply) sseSend(res, "delta", { delta: aiReply });
+          } else {
+            throw err;
+          }
+        }
       } else {
-        aiReply = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb);
-        if (aiReply) sseSend(res, "delta", { delta: aiReply });
+        // Agent mode: run tool/web loop, then stream the final answer so the UI updates token-by-token.
+        const agentResult = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb, {
+          returnTranscript: true,
+        });
+
+        const hasTranscript =
+          agentResult && typeof agentResult === "object" && Array.isArray(agentResult.conversationHistory);
+        const transcript = hasTranscript
+          ? agentResult.conversationHistory
+          : history.map((m) => ({ role: m.role, content: m.content || "" }));
+        const finalDraft = hasTranscript ? String(agentResult.finalDraft || "") : String(agentResult || "");
+
+        if (!hasTranscript) {
+          // Manual fallback path: we already have a final answer string, so "type" it out in chunks.
+          aiReply = finalDraft || "No reply from Dino agent.";
+          const chunkSize = 40;
+          for (let i = 0; i < aiReply.length; i += chunkSize) {
+            if (abortController.signal.aborted) break;
+            sseSend(res, "delta", { delta: aiReply.slice(i, i + chunkSize) });
+            // Yield so the client renders progressively.
+            await sleepMs(5);
+          }
+        } else {
+          const finalMessages = transcript.slice();
+          // If the agent already produced a final assistant draft, don't echo it back; ask for a fresh final response.
+          if (finalMessages[finalMessages.length - 1]?.role === "assistant") {
+            finalMessages.pop();
+          }
+          finalMessages.push({
+            role: "system",
+            content:
+              "Provide the final answer to the user now. Do not call tools. Be concise and directly answer the question.",
+          });
+
+          let streamedAny = false;
+          try {
+            aiReply = await streamOpenAICompatibleChatCompletions({
+              url: `${hfRouterBaseUrl}/chat/completions`,
+              payload: {
+                model: CHAT_MODELS.dino.model,
+                messages: finalMessages,
+                max_tokens: aiDeepSearchMaxTokens,
+                temperature: 0.6,
+                stream: true,
+              },
+              headers: {
+                Authorization: `Bearer ${hfToken}`,
+                "Content-Type": "application/json",
+              },
+              timeoutMs: 60000,
+              providerLabel: "HF Router (Dino Agent Final)",
+              onDelta: (delta) => {
+                streamedAny = true;
+                sseSend(res, "delta", { delta });
+              },
+              signal: abortController.signal,
+            });
+          } catch (err) {
+            const partial = String(err?.partialText || "");
+            if (partial) {
+              aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
+            } else if (!streamedAny) {
+              // Worst-case fallback: return the agent-produced draft so the user still gets an answer.
+              aiReply = finalDraft || "No reply from Dino agent.";
+              if (aiReply) sseSend(res, "delta", { delta: aiReply });
+            } else {
+              throw err;
+            }
+          }
+        }
 
         if (agentMode && dinoSelfLearningEnabled) {
           runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply).catch(console.error);
@@ -2277,45 +2647,74 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
     const maxTokens = sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
     let aiReply = "";
 
-    if (selectedModelId === "groq") {
-      aiReply = await streamOpenAICompatibleChatCompletions({
-        url: `${groqBaseUrl}/chat/completions`,
-        payload: {
-          model: CHAT_MODELS.groq.model,
-          messages: messagesForModel,
-          max_tokens: maxTokens,
-          temperature: 0.7,
-          stream: true,
-        },
-        headers: {
-          Authorization: `Bearer ${groqApiKey}`,
-          "Content-Type": "application/json",
-        },
-        timeoutMs: 45000,
-        providerLabel: "Groq",
-        onDelta: (delta) => sseSend(res, "delta", { delta }),
-        signal: abortController.signal,
-      });
-    } else {
-      // Default to HF standard model for this stream route.
-      aiReply = await streamOpenAICompatibleChatCompletions({
-        url: `${hfRouterBaseUrl}/chat/completions`,
-        payload: {
-          model: CHAT_MODELS.hf.model,
-          messages: messagesForModel,
-          max_tokens: maxTokens,
-          temperature: 0.7,
-          stream: true,
-        },
-        headers: {
-          Authorization: `Bearer ${hfToken}`,
-          "Content-Type": "application/json",
-        },
-        timeoutMs: 60000,
-        providerLabel: "HF Router",
-        onDelta: (delta) => sseSend(res, "delta", { delta }),
-        signal: abortController.signal,
-      });
+    let streamedAny = false;
+    try {
+      if (selectedModelId === "groq") {
+        aiReply = await streamOpenAICompatibleChatCompletions({
+          url: `${groqBaseUrl}/chat/completions`,
+          payload: {
+            model: CHAT_MODELS.groq.model,
+            messages: messagesForModel,
+            max_tokens: maxTokens,
+            temperature: 0.7,
+            stream: true,
+          },
+          headers: {
+            Authorization: `Bearer ${groqApiKey}`,
+            "Content-Type": "application/json",
+          },
+          timeoutMs: 45000,
+          providerLabel: "Groq",
+          onDelta: (delta) => {
+            streamedAny = true;
+            sseSend(res, "delta", { delta });
+          },
+          signal: abortController.signal,
+        });
+      } else {
+        // Default to HF standard model for this stream route.
+        aiReply = await streamOpenAICompatibleChatCompletions({
+          url: `${hfRouterBaseUrl}/chat/completions`,
+          payload: {
+            model: CHAT_MODELS.hf.model,
+            messages: messagesForModel,
+            max_tokens: maxTokens,
+            temperature: 0.7,
+            stream: true,
+          },
+          headers: {
+            Authorization: `Bearer ${hfToken}`,
+            "Content-Type": "application/json",
+          },
+          timeoutMs: 60000,
+          providerLabel: "HF Router",
+          onDelta: (delta) => {
+            streamedAny = true;
+            sseSend(res, "delta", { delta });
+          },
+          signal: abortController.signal,
+        });
+      }
+    } catch (err) {
+      const partial = String(err?.partialText || "");
+      if (partial) {
+        aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
+      } else if (!streamedAny) {
+        // Fallback to non-stream completion so the user still gets an answer.
+        if (selectedModelId === "groq") {
+          aiReply = await sendGroqCompletion(messagesForModel, maxTokens, 0.7);
+        } else {
+          const msg = await sendHfRouterChatMessage(messagesForModel, {
+            maxTokens,
+            temperature: 0.7,
+            model: CHAT_MODELS.hf.model,
+          });
+          aiReply = msg?.content || "";
+        }
+        if (aiReply) sseSend(res, "delta", { delta: aiReply });
+      } else {
+        throw err;
+      }
     }
 
     if (sources.length > 0) {
@@ -2374,6 +2773,12 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
       // ignore
     }
     return res.end();
+  } finally {
+    try {
+      clearInterval(heartbeat);
+    } catch (_) {
+      // ignore
+    }
   }
 });
 

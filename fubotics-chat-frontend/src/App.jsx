@@ -4,7 +4,11 @@ import html2canvas from "html2canvas";
 import nexacoreLogo from "./assets/nexacore-logo.svg";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+// Important: keep API host aligned with the frontend host, otherwise refresh cookies can be set on
+// `localhost` while the UI is running on `127.0.0.1` (or vice versa), causing `/api/refresh` 401 loops.
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== "undefined" ? `http://${window.location.hostname}:5000` : "http://localhost:5000");
 const ANONYMOUS_DEFAULT_MODEL = "hf";
 const LANDING_TITLES = [
   "What can I help with?",
@@ -897,6 +901,25 @@ export default function App() {
         setSelectedSessionId(requested);
         await fetchMessages(requested);
       } else {
+        // Preserve current session selection during token refresh / background reloads.
+        // Clearing here collapses in-flight streaming replies.
+        const current = selectedSessionId;
+        const currentStillValid = Number.isInteger(current) && list.some((s) => s.id === current);
+        if (currentStillValid) {
+          return;
+        }
+
+        if (list.length > 0) {
+          const nextId = list[0].id;
+          setSelectedSessionId(nextId);
+          searchParams.set("session", String(nextId));
+          const next = new URL(window.location.href);
+          next.search = searchParams.toString();
+          window.history.replaceState({}, "", next.toString());
+          await fetchMessages(nextId);
+          return;
+        }
+
         setSelectedSessionId(null);
         setMessages([]);
         setSessionAttachments([]);
@@ -1054,7 +1077,8 @@ export default function App() {
     setSelectedSessionId(newSession.id);
     setIncognitoDraftSelected(false);
     setIncognitoMessages([]);
-    setMessages([]);
+    // Do not clear messages here: handleSend may have already added optimistic
+    // user/assistant messages and streaming deltas depend on them being present.
     clearAttachedFilesState();
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
@@ -1833,8 +1857,21 @@ export default function App() {
         e.name = "AbortError";
         throw e;
       }
-      // Most commonly: auth got cleared mid-stream or the connection dropped.
-      throw new Error("Stream disconnected before completion. If this keeps happening, login again and retry.");
+      // Fallback: if the stream got disconnected but the backend still persisted the assistant message,
+      // load the latest messages and continue.
+      const sessionId = payload?.sessionId;
+      if (sessionId && token) {
+        try {
+          const res = await axios.get(`${API_BASE}/api/messages`, { params: { sessionId } });
+          const messages = Array.isArray(res.data?.messages) ? res.data.messages : null;
+          if (messages) return { messages };
+        } catch (_) {
+          // ignore fallback errors
+        }
+      }
+
+      // Most commonly: auth got cleared mid-stream or the connection dropped before persistence.
+      throw new Error("Stream disconnected before completion. Please login again and retry.");
     }
     return finalPayload;
   }
@@ -2102,14 +2139,24 @@ export default function App() {
           { id: Date.now() + 1, role: "assistant", content: "Error talking to server" },
         ]);
       } else {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now() + 1,
-            role: "assistant",
-            content: "Error talking to server",
-          },
-        ]);
+        if (optimisticAssistantTempId) {
+          const msg = String(err?.message || "Error talking to server");
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (String(m.id) !== String(optimisticAssistantTempId)) return m;
+              return { ...m, content: msg };
+            })
+          );
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Date.now() + 1,
+              role: "assistant",
+              content: "Error talking to server",
+            },
+          ]);
+        }
       }
     } finally {
       if (activeRequestControllerRef.current === requestController) {
@@ -2814,14 +2861,30 @@ export default function App() {
                       e.stopPropagation();
                       setPendingDeleteSessionId(null);
                       const rect = e.currentTarget.getBoundingClientRect();
+                      const estimatedMenuHeight = 260;
+                      const minVisibleHeight = 160;
+                      const desiredLeft = rect.right - 172;
+                      const safeLeft = Math.max(12, Math.min(desiredLeft, window.innerWidth - 188));
+
+                      const belowTop = rect.bottom + 8;
+                      const belowSpace = window.innerHeight - belowTop - 12;
+                      const openAbove = belowSpace < minVisibleHeight;
+                      const safeTop = openAbove
+                        ? Math.max(12, rect.top - 8 - estimatedMenuHeight)
+                        : Math.max(12, belowTop);
+                      const maxHeight = openAbove
+                        ? Math.max(minVisibleHeight, Math.min(360, rect.top - 12))
+                        : Math.max(minVisibleHeight, Math.min(360, belowSpace));
+
                       setOpenSessionMenuId((prev) => {
                         if (prev === session.id) {
                           setSessionMenuPosition(null);
                           return null;
                         }
                         setSessionMenuPosition({
-                          top: rect.bottom + 8,
-                          left: Math.min(rect.right - 172, window.innerWidth - 188),
+                          top: safeTop,
+                          left: safeLeft,
+                          maxHeight,
                         });
                         return session.id;
                       });
@@ -2905,6 +2968,7 @@ export default function App() {
             style={{
               top: `${sessionMenuPosition.top}px`,
               left: `${sessionMenuPosition.left}px`,
+              maxHeight: sessionMenuPosition.maxHeight ? `${sessionMenuPosition.maxHeight}px` : undefined,
             }}
             onClick={(e) => e.stopPropagation()}
           >
