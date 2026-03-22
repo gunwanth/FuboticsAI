@@ -289,7 +289,9 @@ const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "false").toLowerCase
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
 const hfRouterBaseUrl = (process.env.HF_ROUTER_BASE_URL || "https://router.huggingface.co/v1").replace(/\/+$/, "");
 const hfChatModel = process.env.HF_CHAT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
-const dinoAgentModel = process.env.DINO_AGENT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
+// Dino's "base LLM" model. Previously this used HF Router, but Dino now runs on Groq as its base LLM.
+// Keep env override for flexibility.
+const dinoBaseModel = process.env.DINO_BASE_MODEL || process.env.DINO_GROQ_MODEL || groqChatModel;
 let hfChatPermissionDenied = false;
 const dinoAgentMaxIterations = Math.min(
   8,
@@ -321,6 +323,7 @@ const hfImageSteps = Math.min(60, Math.max(1, Number.parseInt(process.env.HF_IMA
 const hfImageGuidance = Math.min(20, Math.max(1, Number.parseFloat(process.env.HF_IMAGE_GUIDANCE || "7.5")));
 const pollinationsBaseUrl = (process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai").replace(/\/$/, "");
 const pollinationsImageModel = process.env.POLLINATIONS_IMAGE_MODEL || "flux";
+const quickchartBaseUrl = (process.env.QUICKCHART_BASE_URL || "https://quickchart.io").replace(/\/+$/, "");
 const localImageWorkerUrl = (process.env.LOCAL_IMAGE_WORKER_URL || "").trim();
 const localImageWorkerApiKey = process.env.LOCAL_IMAGE_WORKER_API_KEY || null;
 const localImageWorkerTimeoutMs = Math.min(
@@ -349,8 +352,8 @@ const CHAT_MODELS = {
   dino: {
     id: "dino",
     label: "Dino_1.0",
-    enabled: Boolean(hfToken),
-    model: dinoAgentModel,
+    enabled: Boolean(groqApiKey),
+    model: dinoBaseModel,
   },
 };
 
@@ -1234,6 +1237,142 @@ async function generateImageFile(sessionId, prompt) {
   return imageGenerationService.generateImageFile(sessionId, prompt);
 }
 
+async function fetchQuickchartPng({ chart, width, height, backgroundColor } = {}) {
+  if (!quickchartBaseUrl) {
+    throw new Error("QUICKCHART_BASE_URL is not configured.");
+  }
+  const payload = {
+    chart,
+    ...(width ? { width } : {}),
+    ...(height ? { height } : {}),
+    ...(backgroundColor ? { backgroundColor } : {}),
+    format: "png",
+  };
+
+  const response = await axios.post(`${quickchartBaseUrl}/chart`, payload, {
+    timeout: 45000,
+    responseType: "arraybuffer",
+    headers: { "Content-Type": "application/json" },
+    validateStatus: () => true,
+  });
+  if (response.status < 200 || response.status >= 300) {
+    let detail = "";
+    try {
+      detail = Buffer.from(response.data || "").toString("utf8").slice(0, 500);
+    } catch (_) {
+      // ignore
+    }
+    throw new Error(`QuickChart error: HTTP ${response.status}${detail ? ` | ${detail}` : ""}`);
+  }
+  return Buffer.from(response.data);
+}
+
+async function generateChartSpec(prompt, contextText = "", preferredModel = null) {
+  const selectedModel = resolvePreferredChatModel(preferredModel);
+  const modelLabel = CHAT_MODELS[selectedModel]?.label || selectedModel;
+
+  const system = `You generate charts from user prompts.
+
+Return ONLY valid JSON. No markdown, no extra text.
+
+Schema:
+{
+  "title": "short title",
+  "insights": ["3-6 bullet insights"],
+  "width": 900,
+  "height": 450,
+  "chart": {
+    "type": "line|bar|pie|doughnut|radar|polarArea|scatter|bubble|mixed",
+    "data": { "labels": [...], "datasets": [...] },
+    "options": { ... }
+  }
+}
+
+Rules:
+- Use a suitable chart type for the prompt.
+- If the prompt contains a table/CSV, use it as data. If not, infer a small dataset (<= 50 points).
+- Keep the Chart.js config compatible with QuickChart (Chart.js).
+- Make axes readable and include legends when multiple series exist.`;
+
+  const user = [
+    contextText ? `Context (may contain data):\n${String(contextText).slice(0, 12000)}` : null,
+    `Prompt:\n${String(prompt || "").slice(0, 4000)}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
+
+  let msg = null;
+  try {
+    if (selectedModel === "groq" || selectedModel === "dino") {
+      msg = await sendGroqChatMessage(messages, {
+        maxTokens: 1400,
+        temperature: 0.2,
+        tools: null,
+        toolChoice: null,
+        model: selectedModel === "dino" ? CHAT_MODELS.dino.model : CHAT_MODELS.groq.model,
+      });
+    } else if (selectedModel === "hf") {
+      msg = await sendHfRouterChatMessage(messages, {
+        maxTokens: 1400,
+        temperature: 0.2,
+        tools: null,
+        toolChoice: null,
+        model: CHAT_MODELS.hf.model,
+      });
+    } else {
+      throw new Error(`Unsupported model for chart generation: ${selectedModel}`);
+    }
+  } catch (err) {
+    throw new Error(`Chart spec generation failed on "${modelLabel}": ${err?.message || err}`);
+  }
+
+  const parsed = extractFirstJsonObject(msg?.content || "");
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`Chart spec generation returned invalid JSON on "${modelLabel}".`);
+  }
+  if (!parsed.chart || typeof parsed.chart !== "object" || !parsed.chart.type || !parsed.chart.data) {
+    throw new Error(`Chart spec JSON is missing required fields (chart.type/chart.data) on "${modelLabel}".`);
+  }
+  return parsed;
+}
+
+async function generateChartFile(sessionId, prompt, contextText = "", preferredModel = null) {
+  const spec = await generateChartSpec(prompt, contextText, preferredModel);
+  const width = Number.isFinite(Number(spec.width)) ? Math.min(1600, Math.max(360, Number(spec.width))) : 900;
+  const height = Number.isFinite(Number(spec.height)) ? Math.min(1200, Math.max(240, Number(spec.height))) : 450;
+  const title = String(spec.title || "Chart").slice(0, 120);
+  const insights = Array.isArray(spec.insights) ? spec.insights.map((s) => String(s)).filter(Boolean).slice(0, 8) : [];
+
+  const png = await fetchQuickchartPng({
+    chart: spec.chart,
+    width,
+    height,
+    backgroundColor: "transparent",
+  });
+
+  const filename = buildGeneratedFilename(title || prompt, "chart", "png");
+  const filePath = path.join(generatedDir, filename);
+  fs.writeFileSync(filePath, png);
+
+  const attachment = await attachmentModel.create(
+    sessionId,
+    filename,
+    filename,
+    filePath,
+    "image/png",
+    fs.statSync(filePath).size,
+    JSON.stringify({ type: "generated_chart", title, insights }),
+    true
+  );
+
+  return { attachment, title, insights };
+}
+
 function detectGenerationRequest(content) {
   const raw = String(content || "");
   const text = raw.toLowerCase();
@@ -1256,9 +1395,15 @@ function detectGenerationRequest(content) {
     text.includes("make") ||
     text.includes("export") ||
     text.includes("convert") ||
-    text.includes("prepare");
+    text.includes("prepare") ||
+    text.includes("plot") ||
+    text.includes("visualize") ||
+    text.includes("draw") ||
+    text.includes("chart") ||
+    text.includes("graph");
   if (!asksForCreation) return null;
   if (text.includes("image")) return "image";
+  if (text.includes("chart") || text.includes("graph")) return "chart";
   if (text.includes("ppt") || text.includes("powerpoint") || text.includes("presentation")) return "ppt";
   if (text.includes("pdf")) return "pdf";
   if (text.includes("notes") || text.includes("note")) return "notes";
@@ -1548,7 +1693,8 @@ function isAutoToolChoiceUnsupportedError(err) {
 }
 
 async function sendDinoChatMessage(messages, options) {
-  return sendHfRouterChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
+  // Dino is a persona/agentic wrapper; its base LLM runs on Groq.
+  return sendGroqChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
 }
 
 async function sendGroqCompletion(messages, maxTokens, temperature, model = null) {
@@ -2342,11 +2488,22 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
     if (generationType) {
       let generatedAttachment = null;
       let generationError = null;
+      let assistantMsgOverride = null;
       try {
         const historyForGeneration = await messageModel.getBySessionId(parsedSessionId);
         const conversationContext = buildHistoryContext(historyForGeneration);
         if (generationType === "image") {
           generatedAttachment = await generateImageFile(parsedSessionId, content);
+        } else if (generationType === "chart") {
+          const chartResult = await generateChartFile(parsedSessionId, content, conversationContext, model);
+          generatedAttachment = chartResult.attachment;
+          const insights = chartResult.insights || [];
+          assistantMsgOverride = [
+            `Generated CHART successfully: ${generatedAttachment.original_filename}`,
+            insights.length > 0 ? `\nInsights:\n${insights.map((s) => `- ${s}`).join("\n")}` : "",
+          ]
+            .join("")
+            .trim();
         } else if (generationType === "ppt") {
           generatedAttachment = await generatePptFile(parsedSessionId, content, conversationContext);
         } else if (generationType === "pdf") {
@@ -2361,9 +2518,9 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         console.error(`Generation failed for type ${generationType}:`, err.message);
       }
 
-      const assistantMsg = generatedAttachment
+      const assistantMsg = assistantMsgOverride || (generatedAttachment
         ? `Generated ${generationType.toUpperCase()} successfully: ${generatedAttachment.original_filename}`
-        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`);
       const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg, "generation_pipeline");
       if (generatedAttachment) await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
 
@@ -2380,7 +2537,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         await messageModel.create(
           parsedSessionId,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
           selectedModelId
         );
         const messages = await messageModel.getBySessionId(parsedSessionId);
@@ -2453,7 +2610,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         let streamedAny = false;
         try {
           aiReply = await streamOpenAICompatibleChatCompletions({
-            url: `${hfRouterBaseUrl}/chat/completions`,
+            url: `${groqBaseUrl}/chat/completions`,
             payload: {
               model: CHAT_MODELS.dino.model,
               messages: messagesForModel,
@@ -2462,11 +2619,11 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
               stream: true,
             },
             headers: {
-              Authorization: `Bearer ${hfToken}`,
+              Authorization: `Bearer ${groqApiKey}`,
               "Content-Type": "application/json",
             },
-            timeoutMs: 60000,
-            providerLabel: "HF Router (Dino)",
+            timeoutMs: 45000,
+            providerLabel: "Groq (Dino base)",
             onDelta: (delta) => {
               streamedAny = true;
               sseSend(res, "delta", { delta });
@@ -2479,7 +2636,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
             aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
           } else if (!streamedAny) {
             // Fallback to non-stream completion so the user still gets an answer.
-            const msg = await sendHfRouterChatMessage(messagesForModel, {
+            const msg = await sendGroqChatMessage(messagesForModel, {
               maxTokens,
               temperature: 0.7,
               model: CHAT_MODELS.dino.model,
@@ -2528,7 +2685,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
           let streamedAny = false;
           try {
             aiReply = await streamOpenAICompatibleChatCompletions({
-              url: `${hfRouterBaseUrl}/chat/completions`,
+              url: `${groqBaseUrl}/chat/completions`,
               payload: {
                 model: CHAT_MODELS.dino.model,
                 messages: finalMessages,
@@ -2537,11 +2694,11 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
                 stream: true,
               },
               headers: {
-                Authorization: `Bearer ${hfToken}`,
+                Authorization: `Bearer ${groqApiKey}`,
                 "Content-Type": "application/json",
               },
-              timeoutMs: 60000,
-              providerLabel: "HF Router (Dino Agent Final)",
+              timeoutMs: 45000,
+              providerLabel: "Groq (Dino Agent Final)",
               onDelta: (delta) => {
                 streamedAny = true;
                 sseSend(res, "delta", { delta });
@@ -2810,11 +2967,22 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
     if (generationType) {
       let generatedAttachment = null;
       let generationError = null;
+      let assistantMsgOverride = null;
       try {
         const historyForGeneration = await messageModel.getBySessionId(parsedSessionId);
         const conversationContext = buildHistoryContext(historyForGeneration);
         if (generationType === "image") {
           generatedAttachment = await generateImageFile(parsedSessionId, content);
+        } else if (generationType === "chart") {
+          const chartResult = await generateChartFile(parsedSessionId, content, conversationContext, model);
+          generatedAttachment = chartResult.attachment;
+          const insights = chartResult.insights || [];
+          assistantMsgOverride = [
+            `Generated CHART successfully: ${generatedAttachment.original_filename}`,
+            insights.length > 0 ? `\nInsights:\n${insights.map((s) => `- ${s}`).join("\n")}` : "",
+          ]
+            .join("")
+            .trim();
         } else if (generationType === "ppt") {
           generatedAttachment = await generatePptFile(parsedSessionId, content, conversationContext);
         } else if (generationType === "pdf") {
@@ -2829,9 +2997,9 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
         console.error(`Generation failed for type ${generationType}:`, err.message);
       }
 
-      const assistantMsg = generatedAttachment
+      const assistantMsg = assistantMsgOverride || (generatedAttachment
         ? `Generated ${generationType.toUpperCase()} successfully: ${generatedAttachment.original_filename}`
-        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`);
       const assistantId = await messageModel.create(parsedSessionId, "assistant", assistantMsg, "generation_pipeline");
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
@@ -2845,7 +3013,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
         const assistantRecord = await messageModel.create(
           parsedSessionId,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
           selectedModel
         );
         void assistantRecord;
@@ -3225,11 +3393,22 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
     if (generationType) {
       let generatedAttachment = null;
       let generationError = null;
+      let assistantMsgOverride = null;
       try {
         const historyForGeneration = await messageModel.getBySessionId(targetMessage.session_id);
         const conversationContext = buildHistoryContext(historyForGeneration);
         if (generationType === "image") {
           generatedAttachment = await generateImageFile(targetMessage.session_id, normalizedContent);
+        } else if (generationType === "chart") {
+          const chartResult = await generateChartFile(targetMessage.session_id, normalizedContent, conversationContext, model);
+          generatedAttachment = chartResult.attachment;
+          const insights = chartResult.insights || [];
+          assistantMsgOverride = [
+            `Edited request processed. Generated CHART: ${generatedAttachment.original_filename}`,
+            insights.length > 0 ? `\nInsights:\n${insights.map((s) => `- ${s}`).join("\n")}` : "",
+          ]
+            .join("")
+            .trim();
         } else if (generationType === "ppt") {
           generatedAttachment = await generatePptFile(targetMessage.session_id, normalizedContent, conversationContext);
         } else if (generationType === "pdf") {
@@ -3244,9 +3423,9 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         console.error(`Generation failed after edit for type ${generationType}:`, err.message);
       }
 
-      const assistantMsg = generatedAttachment
+      const assistantMsg = assistantMsgOverride || (generatedAttachment
         ? `Edited request processed. Generated ${generationType.toUpperCase()}: ${generatedAttachment.original_filename}`
-        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`;
+        : `Could not generate ${generationType} for this request.${generationError ? ` Reason: ${generationError.message}` : ""}`);
       const assistantId = await messageModel.create(targetMessage.session_id, "assistant", assistantMsg, "generation_pipeline");
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
@@ -3260,7 +3439,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         const assistantRecord = await messageModel.create(
           targetMessage.session_id,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because HF_TOKEN is not configured or lacks Inference Providers permission.',
+          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
           selectedModel
         );
         void assistantRecord;

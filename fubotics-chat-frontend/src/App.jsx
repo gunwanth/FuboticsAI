@@ -57,8 +57,13 @@ axios.interceptors.request.use(
       return config;
     }
     const token = localStorage.getItem("accessToken");
+    // Important: axios defaults may still carry a stale Authorization header even after logout.
+    // Always remove it when no token is present so anonymous endpoints work reliably.
     if (token) {
+      config.headers = config.headers || {};
       config.headers.Authorization = `Bearer ${token}`;
+    } else if (config.headers?.Authorization) {
+      delete config.headers.Authorization;
     }
     return config;
   },
@@ -955,6 +960,10 @@ export default function App() {
   }
 
   async function fetchCurrentUser() {
+    if (!token) {
+      setCurrentUser(null);
+      return;
+    }
     try {
       const res = await axios.get(`${API_BASE}/api/me`);
       setCurrentUser(res.data?.user || null);
@@ -1750,132 +1759,6 @@ export default function App() {
     }
   }
 
-  async function postMessagesStream(payload, { onDelta, signal } = {}) {
-    const sendOnce = async (accessToken) => {
-      return await fetch(`${API_BASE}/api/messages/stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify(payload || {}),
-        signal,
-      });
-    };
-
-    const liveToken = localStorage.getItem("accessToken") || token;
-    let res = await sendOnce(liveToken);
-
-    // Streaming uses fetch, so it bypasses axios refresh interceptors. Retry once on expired token.
-    if (res.status === 401) {
-      let body = "";
-      try {
-        body = await res.text();
-      } catch (_) {
-        // ignore
-      }
-      const looksExpired = body.includes("TOKEN_EXPIRED") || body.toLowerCase().includes("token expired");
-      if (looksExpired) {
-        try {
-          const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true, skipAuth: true });
-          const refreshedToken = response.data?.accessToken;
-          if (!refreshedToken) throw new Error("No accessToken in refresh response");
-          localStorage.setItem("accessToken", refreshedToken);
-          setToken(refreshedToken);
-          axios.defaults.headers.common["Authorization"] = `Bearer ${refreshedToken}`;
-          res = await sendOnce(refreshedToken);
-        } catch (err) {
-          localStorage.removeItem("accessToken");
-          delete axios.defaults.headers.common["Authorization"];
-          broadcastLogout();
-          throw err;
-        }
-      }
-    }
-
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(detail || `Stream failed (HTTP ${res.status})`);
-    }
-    if (!res.body || typeof res.body.getReader !== "function") {
-      throw new Error("Streaming is not supported in this browser.");
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let finalPayload = null;
-
-    const processFrame = (frame) => {
-      const lines = String(frame || "").split(/\r?\n/);
-      let eventName = "message";
-      let dataStr = "";
-      for (const line of lines) {
-        if (line.startsWith("event:")) {
-          eventName = line.slice(6).trim() || "message";
-        } else if (line.startsWith("data:")) {
-          dataStr += line.slice(5).trim();
-        }
-      }
-      if (!dataStr) return;
-      let data;
-      try {
-        data = JSON.parse(dataStr);
-      } catch {
-        return;
-      }
-      if (eventName === "delta") {
-        const delta = String(data?.delta || "");
-        if (delta && typeof onDelta === "function") onDelta(delta);
-      } else if (eventName === "final") {
-        finalPayload = data;
-      } else if (eventName === "error") {
-        const msg = String(data?.error || "Stream error");
-        // If the user canceled the request, don't surface a noisy error.
-        if (signal?.aborted && (msg.toLowerCase().includes("canceled") || msg.toLowerCase().includes("cancelled"))) {
-          return;
-        }
-        throw new Error(msg);
-      }
-    };
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        processFrame(frame);
-      }
-    }
-
-    if (!finalPayload) {
-      if (signal?.aborted) {
-        const e = new Error("canceled");
-        e.name = "AbortError";
-        throw e;
-      }
-      // Fallback: if the stream got disconnected but the backend still persisted the assistant message,
-      // load the latest messages and continue.
-      const sessionId = payload?.sessionId;
-      if (sessionId && token) {
-        try {
-          const res = await axios.get(`${API_BASE}/api/messages`, { params: { sessionId } });
-          const messages = Array.isArray(res.data?.messages) ? res.data.messages : null;
-          if (messages) return { messages };
-        } catch (_) {
-          // ignore fallback errors
-        }
-      }
-
-      // Most commonly: auth got cleared mid-stream or the connection dropped before persistence.
-      throw new Error("Stream disconnected before completion. Please login again and retry.");
-    }
-    return finalPayload;
-  }
-
   async function handleSend(options = null) {
     if (speechRecognitionRef.current) {
       voiceShouldContinueRef.current = false;
@@ -2026,7 +1909,7 @@ export default function App() {
           history: historyForApi,
           thinking: false,
           model: ANONYMOUS_DEFAULT_MODEL,
-        }, { signal: requestController.signal });
+        }, { signal: requestController.signal, skipAuth: true });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setSharedMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
 
@@ -2050,7 +1933,7 @@ export default function App() {
           history: historyForApi,
           thinking: false,
           model: ANONYMOUS_DEFAULT_MODEL,
-        }, { signal: requestController.signal });
+        }, { signal: requestController.signal, skipAuth: true });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
         setAnonymousMessages((prev) => [...prev, { id: Date.now() + 1, role: "assistant", content: assistant }]);
 
@@ -2082,13 +1965,8 @@ export default function App() {
       }
 
       const targetSessionId = await ensureSessionForMessage(text);
-      optimisticAssistantTempId = `temp-assistant-${Date.now()}`;
-      setMessages((prev) => [
-        ...prev,
-        { id: optimisticAssistantTempId, isTemporary: true, role: "assistant", content: "" },
-      ]);
-
-      const streamed = await postMessagesStream({
+      // Non-streaming (strict JSON) request: avoids SSE disconnects and ensures the reply is returned as a single payload.
+      const res = await axios.post(`${API_BASE}/api/messages`, {
         sessionId: targetSessionId,
         content: text,
         deepSearch: deepSearchEnabled,
@@ -2096,21 +1974,10 @@ export default function App() {
         agentMode: agentModeEnabled,
         model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined,
-      }, {
-        signal: requestController.signal,
-        onDelta: (delta) => {
-          setMessages((prev) =>
-            prev.map((m) => {
-              if (String(m.id) !== String(optimisticAssistantTempId)) return m;
-              return { ...m, content: String(m.content || "") + delta };
-            })
-          );
-        },
-      });
+      }, { signal: requestController.signal });
 
-      if (streamed?.messages) {
-        setMessages(streamed.messages);
-      }
+      const nextMessages = Array.isArray(res.data?.messages) ? res.data.messages : null;
+      if (nextMessages) setMessages(nextMessages);
     } catch (err) {
       if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError") {
         if (optimisticTempId) {
