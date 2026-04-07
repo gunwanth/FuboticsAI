@@ -1,0 +1,4 @@
+NexaCore RAG test document.
+Project codename: Aurora.
+Primary color mentioned in this document is teal.
+This file is used to verify retrieval from uploaded attachment chunks.

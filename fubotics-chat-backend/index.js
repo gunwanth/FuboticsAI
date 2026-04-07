@@ -1,4 +1,9 @@
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
+const serenaDefaultHost = process.env.SERENA_HTTP_BRIDGE_HOST || "127.0.0.1";
+const serenaDefaultPort = process.env.SERENA_HTTP_BRIDGE_PORT || "9121";
+if (!process.env.SERENA_MCP_URL) {
+  process.env.SERENA_MCP_URL = `http://${serenaDefaultHost}:${serenaDefaultPort}`;
+}
 const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
@@ -7,6 +12,7 @@ const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const { spawn } = require("child_process");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const pdfParse = require("pdf-parse");
@@ -27,10 +33,19 @@ const messageModel = require("./models/message");
 const attachmentModel = require("./models/attachment");
 const shareChatModel = require("./models/shareChat");
 const config = require("./config/database");
-const { buildRagContext, indexAttachmentForRag, indexWebSourcesForRag } = require("./services/ragService");
+const {
+  MODEL_ANNOTATIONS,
+  AGENT_ANNOTATIONS,
+  classifyTokenBudget,
+} = require("./config/modelAnnotations");
+const { buildRagContext, indexAttachmentForRag, indexWebSourcesForRag, chunkText } = require("./services/ragService");
+const { isCodeQuery, runCodingAgentLoop } = require("./services/codingAgentService");
+const { executeSerenaCodeTool, isSerenaCodeTool } = require("./services/serenaConnector");
+const { listAvailableAgents, getAgentById, buildAgentInstruction } = require("./services/agentRegistry");
 const knowledgeSourceModel = require("./models/knowledgeSource");
 const knowledgeChunkModel = require("./models/knowledgeChunk");
 const { createImageGenerationService } = require("./services/imageGenerationService");
+const { listProjectFiles, searchCodebase, readProjectFile } = require("./services/codeToolsService");
 
 const app = express();
 // API responses are user/session specific; disable ETag to avoid 304 responses with empty bodies
@@ -39,6 +54,8 @@ app.set("etag", false);
 const PORT = process.env.PORT || 5000;
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
 const PUBLIC_IMAGE_SHARE_EXPIRY = process.env.PUBLIC_IMAGE_SHARE_EXPIRY || "30d";
+const MAX_UPLOAD_FILE_SIZE_MB = Math.max(1, Number.parseInt(process.env.MAX_UPLOAD_FILE_SIZE_MB || "200", 10));
+const MAX_UPLOAD_FILE_SIZE_BYTES = MAX_UPLOAD_FILE_SIZE_MB * 1024 * 1024;
 app.set("trust proxy", 1);
 
 // ---------- CORS (dynamic allowlist) ----------
@@ -94,6 +111,35 @@ app.use((req, res, next) => {
 // Cookie parser for refresh tokens
 app.use(cookieParser());
 
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "fubotics-chat-backend",
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/ready", async (req, res) => {
+  try {
+    await db.query("SELECT 1");
+    res.json({
+      ok: true,
+      service: "fubotics-chat-backend",
+      database: "reachable",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      service: "fubotics-chat-backend",
+      database: "unreachable",
+      error: err?.message || "Database unavailable",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 // ---------- MULTER SETUP ----------
 const uploadDir = path.join(__dirname, 'uploads');
 const generatedDir = path.join(__dirname, 'generated');
@@ -105,7 +151,7 @@ if (!fs.existsSync(attachmentsDir)) fs.mkdirSync(attachmentsDir);
 // Upload for data analytics
 const upload = multer({
   dest: uploadDir,
-  limits: { fileSize: 50 * 1024 * 1024, files: 5 },
+  limits: { fileSize: MAX_UPLOAD_FILE_SIZE_BYTES, files: 5 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'text/csv' || path.extname(file.originalname).toLowerCase() === '.csv') {
       cb(null, true);
@@ -118,7 +164,7 @@ const upload = multer({
 // Upload for chat attachments (supports multiple file types)
 const chatUpload = multer({
   dest: attachmentsDir,
-  limits: { fileSize: 50 * 1024 * 1024, files: 10 },
+  limits: { fileSize: MAX_UPLOAD_FILE_SIZE_BYTES, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
       'text/csv', 'text/plain', 'application/json',
@@ -289,9 +335,9 @@ const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "false").toLowerCase
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
 const hfRouterBaseUrl = (process.env.HF_ROUTER_BASE_URL || "https://router.huggingface.co/v1").replace(/\/+$/, "");
 const hfChatModel = process.env.HF_CHAT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
-// Dino's "base LLM" model. Previously this used HF Router, but Dino now runs on Groq as its base LLM.
+// Dino's base LLM runs on Groq.
 // Keep env override for flexibility.
-const dinoBaseModel = process.env.DINO_BASE_MODEL || process.env.DINO_GROQ_MODEL || groqChatModel;
+const dinoBaseModel = process.env.DINO_BASE_MODEL || process.env.DINO_GROQ_MODEL || process.env.GROQ_CHAT_MODEL || groqChatModel;
 let hfChatPermissionDenied = false;
 const dinoAgentMaxIterations = Math.min(
   8,
@@ -343,11 +389,11 @@ const CHAT_MODELS = {
     enabled: Boolean(groqApiKey),
     model: groqChatModel,
   },
-  hf: {
-    id: "hf",
-    label: "HF_1.0.1",
-    enabled: Boolean(hfToken),
-    model: hfChatModel,
+  sambanova: {
+    id: "sambanova",
+    label: "SambaNova",
+    enabled: Boolean(sambaNovaApiKey),
+    model: sambaNovaChatModel,
   },
   dino: {
     id: "dino",
@@ -358,7 +404,7 @@ const CHAT_MODELS = {
 };
 
 const defaultChatModel =
-  ["groq", "hf", "dino"].find((id) => CHAT_MODELS[id]?.enabled) || "groq";
+  ["groq", "sambanova", "dino"].find((id) => CHAT_MODELS[id]?.enabled) || "groq";
 
 function createFallbackPng(prompt = "") {
   const width = 768;
@@ -492,6 +538,152 @@ const aiDeepSearchMaxTokens = Math.min(
   4096,
   Math.max(aiDefaultMaxTokens, Number.parseInt(process.env.AI_DEEP_SEARCH_MAX_TOKENS || "3072", 10))
 );
+
+function analyzeConversationState(text = "") {
+  const value = String(text || "").trim();
+  const lower = value.toLowerCase();
+  const wordCount = value ? value.split(/\s+/).filter(Boolean).length : 0;
+  const asksDepth =
+    /(in detail|detailed|deep dive|deeply|thorough|comprehensive|step by step|analyze|analysis|explain fully|full explanation)/i.test(
+      value
+    );
+  const likelyCasual =
+    wordCount <= 18 &&
+    /(hi|hello|hey|yo|thanks|thank you|what's up|whats up|how are you|good morning|good evening|tell me|can you|who are you|what is|why is|help me)/i.test(
+      lower
+    );
+  const researchIntent = /(latest|recent|news|today|current|trend|research|compare|investigate|sources?)/i.test(lower);
+  const codeIntent = /(code|bug|error|stack|route|server|api|css|react|node|database|query|compile|lint|build|deploy|test)/i.test(lower);
+  const emotionalTone = /(stuck|frustrated|annoyed|angry|upset|hate|broken|failing|panic|worried|anxious|confused)/i.test(lower)
+    ? "frustrated"
+    : /(love|great|awesome|nice|excited|happy|amazing|perfect)/i.test(lower)
+      ? "positive"
+      : /(please|could you|would you|curious|wondering)/i.test(lower)
+        ? "warm"
+        : "neutral";
+  const urgency = /(asap|urgent|immediately|right now|quickly|fast|soon)/i.test(lower) ? "high" : "normal";
+  const intent =
+    codeIntent ? "code" : researchIntent ? "research" : likelyCasual ? "chat" : asksDepth ? "analysis" : "general";
+  const responseStyle = asksDepth ? "detailed" : likelyCasual ? "concise" : emotionalTone === "frustrated" ? "supportive" : "balanced";
+
+  return {
+    intent,
+    researchIntent,
+    codeIntent,
+    emotionalTone,
+    urgency,
+    asksDepth,
+    likelyCasual,
+    responseStyle,
+    wordCount,
+  };
+}
+
+function shouldProactivelyGroundDinoWeb({
+  query = "",
+  deepSearch = false,
+  lightning = false,
+  thinking = false,
+  agentMode = false,
+} = {}) {
+  if (deepSearch || dinoAlwaysWeb) {
+    return true;
+  }
+
+  const state = analyzeConversationState(query);
+  const currentInfoIntent =
+    /(latest|recent|today|current|news|update|updates|release|pricing|version|trend|market|status|availability)/i.test(
+      String(query || "")
+    );
+  const broadResearchIntent =
+    state.researchIntent ||
+    state.asksDepth ||
+    /\b(compare|comparison|research|investigate|find sources|look up|web|online)\b/i.test(String(query || ""));
+
+  if (state.codeIntent) {
+    return false;
+  }
+
+  if (state.likelyCasual && !currentInfoIntent) {
+    return false;
+  }
+
+  if (!agentMode && !thinking) {
+    return false;
+  }
+
+  if (lightning) {
+    return currentInfoIntent || broadResearchIntent;
+  }
+
+  return currentInfoIntent || broadResearchIntent || thinking;
+}
+
+function resolveAnswerProfile({
+  promptText = "",
+  hasAttachments = false,
+  usesWeb = false,
+  usesAgentLoop = false,
+  thinking = false,
+  lightning = false,
+  requestedMaxTokens = 0,
+} = {}) {
+  const conversationState = analyzeConversationState(promptText);
+  const tokenPolicy = classifyTokenBudget({
+    promptText,
+    hasAttachments,
+    usesWeb,
+    usesAgentLoop,
+    requestedMaxTokens,
+    lightningMode: lightning,
+  });
+
+  return {
+    conversationState,
+    tokenPolicy,
+    maxTokens: conversationState.likelyCasual && !usesWeb && !usesAgentLoop && !hasAttachments
+      ? Math.min(tokenPolicy.outputBudget, lightning ? 384 : 640)
+      : conversationState.asksDepth && !lightning
+        ? Math.max(tokenPolicy.outputBudget, 1536)
+        : tokenPolicy.outputBudget,
+    temperature:
+      conversationState.emotionalTone === "frustrated"
+        ? 0.35
+        : lightning
+          ? 0.25
+          : thinking
+            ? 0.5
+            : 0.65,
+    webMaxResults: lightning ? Math.min(2, deepSearchMaxResults) : deepSearchMaxResults,
+    ragLimit: lightning ? (usesWeb || thinking || usesAgentLoop ? 4 : 3) : usesWeb || thinking || usesAgentLoop ? 8 : 6,
+    agentMaxIterations:
+      conversationState.likelyCasual && !conversationState.asksDepth && !usesWeb && !thinking
+        ? 1
+        : lightning
+          ? Math.min(2, dinoAgentMaxIterations)
+          : dinoAgentMaxIterations,
+    codePrefetchLimit: lightning ? 4 : 8,
+    finalizeMaxTokens: lightning ? Math.min(900, tokenPolicy.outputBudget) : Math.min(1800, tokenPolicy.outputBudget),
+    sourceSliceLimit: lightning ? Math.min(2, deepSearchMaxResults) : deepSearchMaxResults,
+    evidenceCharLimit: lightning ? 1400 : 2200,
+    systemInstruction: [
+      lightning
+        ? "Lightning mode is ON. Answer fast, directly, and precisely. Prefer the smallest useful evidence set and avoid extended elaboration unless the user explicitly asks for detail."
+        : "",
+      conversationState.likelyCasual && !conversationState.asksDepth
+        ? "This looks like a normal conversational turn. Keep the reply natural, short, and low-friction."
+        : "",
+      conversationState.emotionalTone === "frustrated"
+        ? "The user sounds frustrated or stuck. Be calm, reassuring, and solution-first."
+        : "",
+      conversationState.responseStyle === "detailed" && !lightning
+        ? "The user is asking for depth. Favor a more complete explanation."
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
 
 function stripCodeFence(value) {
   const text = String(value || "").trim();
@@ -750,6 +942,23 @@ function renderAttachmentInsight(analysis) {
 }
 
 async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
+  const qLower = String(query || "").toLowerCase();
+  const prefersFreshNews =
+    /(^|\b)(latest|recent|today|current|news|update|updates|breaking|release|launched|announced)(\b|$)/i.test(qLower);
+  const lowSignalHosts = new Set([
+    "zhihu.com",
+    "www.zhihu.com",
+    "quora.com",
+    "www.quora.com",
+    "pinterest.com",
+    "www.pinterest.com",
+    "facebook.com",
+    "www.facebook.com",
+    "instagram.com",
+    "www.instagram.com",
+    "tiktok.com",
+    "www.tiktok.com",
+  ]);
   const normalizeResultUrl = (rawUrl) => {
     if (!rawUrl) return null;
     let candidate = String(rawUrl).trim();
@@ -774,6 +983,49 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
     } catch (_) {
       return null;
     }
+  };
+
+  const fetchBingRssResults = async (q, limit) => {
+    const rssUrl = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(q)}`;
+    const { data } = await axios.get(rssUrl, {
+      timeout: deepSearchSearchTimeoutMs,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      },
+      validateStatus: () => true,
+    });
+    if (!data) return [];
+    const $ = cheerio.load(String(data || ""), { xmlMode: true });
+    return $("item")
+      .slice(0, Math.max(limit, 12))
+      .map((_, el) => ({
+        title: $(el).find("title").first().text().trim(),
+        url: $(el).find("link").first().text().trim(),
+        snippet: $(el).find("description").first().text().replace(/\s+/g, " ").trim(),
+      }))
+      .get()
+      .filter((item) => item.title && item.url);
+  };
+
+  const fetchGoogleNewsRssResults = async (q, limit) => {
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-IN&gl=IN&ceid=IN:en`;
+    const { data } = await axios.get(rssUrl, {
+      timeout: deepSearchSearchTimeoutMs,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      },
+      validateStatus: () => true,
+    });
+    const $ = cheerio.load(String(data || ""), { xmlMode: true });
+    return $("item")
+      .slice(0, Math.max(limit, 12))
+      .map((_, el) => ({
+        title: $(el).find("title").first().text().trim(),
+        url: $(el).find("link").first().text().trim(),
+        snippet: $(el).find("description").first().text().replace(/\s+/g, " ").trim(),
+      }))
+      .get()
+      .filter((item) => item.title && item.url);
   };
 
   try {
@@ -805,6 +1057,12 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
         if (title && normalized) rawResults.push({ title, url: normalized, snippet: "" });
       });
     }
+    if (rawResults.length === 0 && prefersFreshNews) {
+      rawResults.push(...(await fetchGoogleNewsRssResults(query, targetResults * 2)));
+    }
+    if (rawResults.length === 0) {
+      rawResults.push(...(await fetchBingRssResults(query, targetResults * 2)));
+    }
 
     const unique = [];
     const seenDomainCount = new Map();
@@ -817,6 +1075,9 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
           hostname = new URL(item.url).hostname;
         } catch (_) {
           hostname = "";
+        }
+        if (lowSignalHosts.has(hostname)) {
+          continue;
         }
         const domainHits = seenDomainCount.get(hostname) || 0;
         if (domainHits < 2) {
@@ -1316,14 +1577,10 @@ Rules:
         toolChoice: null,
         model: selectedModel === "dino" ? CHAT_MODELS.dino.model : CHAT_MODELS.groq.model,
       });
-    } else if (selectedModel === "hf") {
-      msg = await sendHfRouterChatMessage(messages, {
-        maxTokens: 1400,
-        temperature: 0.2,
-        tools: null,
-        toolChoice: null,
-        model: CHAT_MODELS.hf.model,
-      });
+    } else if (selectedModel === "sambanova") {
+      msg = {
+        content: await sendSambaNovaCompletion(messages, 1400, 0.2, CHAT_MODELS.sambanova.model),
+      };
     } else {
       throw new Error(`Unsupported model for chart generation: ${selectedModel}`);
     }
@@ -1413,6 +1670,9 @@ function detectGenerationRequest(content) {
 
 function resolvePreferredChatModel(value) {
   const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "hf") {
+    return CHAT_MODELS.sambanova?.enabled ? "sambanova" : defaultChatModel;
+  }
   if (normalized && CHAT_MODELS[normalized]) return normalized;
   return defaultChatModel;
 }
@@ -1575,7 +1835,6 @@ async function sendHfRouterChatMessage(
       (msg.toLowerCase().includes("inference providers") || msg.toLowerCase().includes("sufficient permissions"));
     if (permissionDenied) {
       hfChatPermissionDenied = true;
-      if (CHAT_MODELS?.hf) CHAT_MODELS.hf.enabled = false;
       throw new Error(
         'HF Router permission error (403): your token cannot call Inference Providers. Create a new Hugging Face access token with "Inference Providers" enabled, set it in HF_TOKEN, then restart the backend.'
       );
@@ -1717,7 +1976,10 @@ async function enqueueSambaNovaChat(task) {
   }
 }
 
-async function sendSambaNovaCompletion(messages, maxTokens, temperature, model = null) {
+async function sendSambaNovaChatMessage(
+  messages,
+  { maxTokens, temperature, tools = null, toolChoice = "auto", model = null } = {}
+) {
   return enqueueSambaNovaChat(async () => {
     const data = await postChatCompletionsWithRetry({
       url: `${sambaNovaBaseUrl}/chat/completions`,
@@ -1726,6 +1988,7 @@ async function sendSambaNovaCompletion(messages, maxTokens, temperature, model =
         messages,
         max_tokens: maxTokens,
         temperature,
+        ...(tools ? { tools, tool_choice: toolChoice } : {}),
       },
       headers: {
         Authorization: `Bearer ${sambaNovaApiKey}`,
@@ -1735,8 +1998,13 @@ async function sendSambaNovaCompletion(messages, maxTokens, temperature, model =
       providerLabel: "SambaNova",
       maxRetries: 3,
     });
-    return data?.choices?.[0]?.message?.content || "";
+    return data?.choices?.[0]?.message || null;
   });
+}
+
+async function sendSambaNovaCompletion(messages, maxTokens, temperature, model = null) {
+  const msg = await sendSambaNovaChatMessage(messages, { maxTokens, temperature, model });
+  return msg?.content || "";
 }
 
 async function getAIReply(
@@ -1745,11 +2013,20 @@ async function getAIReply(
   webSources = [],
   extraContext = "",
   preferredModel = null,
-  thinking = false
+  thinking = false,
+  lightning = false
 ) {
   try {
     let systemContent = "You are a helpful assistant.";
     const selectedModel = resolvePreferredChatModel(preferredModel);
+    const answerProfile = resolveAnswerProfile({
+      promptText: history?.[history.length - 1]?.content || "",
+      hasAttachments: sessionAttachments.length > 0,
+      usesWeb: webSources.length > 0,
+      thinking,
+      lightning,
+      requestedMaxTokens: webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
+    });
 
     if (selectedModel === "dino") {
       systemContent = "You are Dino 1.0, an advanced NexaCore AI. You have powerful reasoning capabilities and access to indexed knowledge.";
@@ -1777,7 +2054,7 @@ async function getAIReply(
 
     if (webSources.length > 0) {
       systemContent += "\n\nDeep web research sources were collected for this answer. Cite them when useful:\n";
-      for (const source of webSources.slice(0, deepSearchMaxResults)) {
+      for (const source of webSources.slice(0, answerProfile.sourceSliceLimit)) {
         const safeSnippet = String(source.snippet || "").replace(/\s+/g, " ").trim().slice(0, deepSearchSnippetChars);
         systemContent += `\n- ${source.title} (${source.url})\n  Snippet: ${safeSnippet}`;
       }
@@ -1791,13 +2068,16 @@ async function getAIReply(
       systemContent +=
         "\n\nThinking mode is ON. Think deeply, reason step-by-step internally, and provide a clear, well-structured answer.";
     }
+    if (answerProfile.systemInstruction) {
+      systemContent += `\n\n${answerProfile.systemInstruction}`;
+    }
 
     const messages = [
       { role: "system", content: systemContent },
       ...history.map((m) => ({ role: m.role, content: m.content || "" })),
     ];
 
-    const maxTokens = webSources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
+    const maxTokens = answerProfile.maxTokens;
     const selectedConfig = CHAT_MODELS[selectedModel];
 
     if (!selectedConfig?.enabled) {
@@ -1806,7 +2086,7 @@ async function getAIReply(
 
     if (selectedModel === "groq") {
       try {
-        const groqReply = await sendGroqCompletion(messages, maxTokens, 0.7);
+        const groqReply = await sendGroqCompletion(messages, maxTokens, answerProfile.temperature);
         return groqReply || "No reply from AI";
       } catch (err) {
         console.warn("Groq chat failed:", err?.message || err);
@@ -1814,16 +2094,15 @@ async function getAIReply(
       }
     }
 
-    if (selectedModel === "hf") {
+    if (selectedModel === "sambanova") {
       try {
-        const msg = await sendHfRouterChatMessage(messages, {
+        const msg = await sendSambaNovaCompletion(
+          messages,
           maxTokens,
-          temperature: 0.7,
-          tools: null,
-          toolChoice: "auto",
-          model: CHAT_MODELS.hf.model,
-        });
-        return msg?.content || "No reply from AI";
+          answerProfile.temperature,
+          CHAT_MODELS.sambanova.model
+        );
+        return msg || "No reply from AI";
       } catch (err) {
         console.warn(`${selectedModel} chat failed:`, err?.message || err);
         return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
@@ -1834,7 +2113,7 @@ async function getAIReply(
       try {
         const msg = await sendDinoChatMessage(messages, {
           maxTokens,
-          temperature: 0.7,
+          temperature: answerProfile.temperature,
           tools: null,
           toolChoice: "auto",
         });
@@ -1900,7 +2179,628 @@ const DINO_AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "list_project_files",
+      description: "List project files to navigate the codebase and identify relevant implementation areas.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional filename or area hint such as auth, css, agent, frontend, backend." },
+          limit: { type: "integer", description: "Maximum number of file paths to return." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_codebase",
+      description: "Search the codebase for routes, components, services, functions, strings, errors, or implementation details.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The code or feature query to search for." },
+          fileHint: { type: "string", description: "Optional file or folder hint to narrow the search." },
+          limit: { type: "integer", description: "Maximum number of matches to return." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_project_file",
+      description: "Read a project file with line numbers for deeper code analysis.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Project-relative path, for example fubotics-chat-backend/index.js" },
+          startLine: { type: "integer" },
+          endLine: { type: "integer" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "store_code_knowledge",
+      description: "Store durable code analysis, architecture notes, bug findings, or implementation ideas into the knowledge base.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short title." },
+          content: { type: "string", description: "Reusable code insight or analysis." },
+          tags: { type: "array", items: { type: "string" } },
+          knowledgeKind: { type: "string", description: "For example code_analysis, architecture_note, bug_analysis, refactor_idea." },
+        },
+        required: ["title", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_project_checks",
+      description: "Run syntax, lint, and optional build checks to detect code errors, regressions, and implementation issues.",
+      parameters: {
+        type: "object",
+        properties: {
+          scope: { type: "string", description: "quick or full" },
+          includeBuild: { type: "boolean", description: "Whether to include a build check." },
+        },
+      },
+    },
+  },
 ];
+
+const dinoUseMcpTools = String(process.env.DINO_USE_MCP_TOOLS || "true").toLowerCase() !== "false";
+const dinoMcpToolTimeoutMs = Math.min(
+  120000,
+  Math.max(5000, Number.parseInt(process.env.DINO_MCP_TOOL_TIMEOUT_MS || "30000", 10))
+);
+const dinoMcpHttpUrl = String(process.env.DINO_MCP_HTTP_URL || "http://127.0.0.1:5051").trim().replace(/\/+$/, "");
+const dinoMcpAutoWake = String(process.env.DINO_MCP_AUTO_WAKE || "false").toLowerCase() === "true";
+const dinoMcpComposeFile = process.env.DINO_MCP_COMPOSE_FILE || path.join(__dirname, "docker-compose.mcp.yml");
+const dinoMcpComposeEnvFile = process.env.DINO_MCP_ENV_FILE || path.join(__dirname, ".env.mcp");
+let dinoMcpClientPromise = null;
+let dinoMcpWakeAttempted = false;
+let dinoMcpHttpDisabledUntil = 0;
+let dinoMcpLastHttpWarningAt = 0;
+const serenaHttpAutoWake = String(process.env.SERENA_HTTP_AUTO_WAKE || "true").toLowerCase() !== "false";
+const serenaHttpBridgeHost = process.env.SERENA_HTTP_BRIDGE_HOST || "127.0.0.1";
+const serenaHttpBridgePort = Number.parseInt(process.env.SERENA_HTTP_BRIDGE_PORT || "9121", 10);
+const serenaHttpBridgeUrl = String(process.env.SERENA_MCP_URL || `http://${serenaHttpBridgeHost}:${serenaHttpBridgePort}`).replace(/\/+$/, "");
+const serenaHttpBridgeFile = process.env.SERENA_HTTP_BRIDGE_FILE || path.join(__dirname, "serena-http-bridge.js");
+let serenaHttpWakeAttempted = false;
+
+function shouldTryDinoMcpHttp() {
+  return !!dinoMcpHttpUrl && Date.now() >= dinoMcpHttpDisabledUntil;
+}
+
+function markDinoMcpHttpUnavailable(err) {
+  dinoMcpHttpDisabledUntil = Date.now() + 60_000;
+  if (Date.now() - dinoMcpLastHttpWarningAt > 30_000) {
+    dinoMcpLastHttpWarningAt = Date.now();
+    console.warn("[Dino MCP] HTTP bridge unavailable, falling back to local MCP child:", err?.message || err);
+  }
+}
+
+async function maybeWakeSerenaHttpBridge() {
+  if (!serenaHttpAutoWake || serenaHttpWakeAttempted) return;
+  serenaHttpWakeAttempted = true;
+
+  if (!fs.existsSync(serenaHttpBridgeFile)) {
+    console.warn("[Serena MCP] Auto-wake skipped because serena-http-bridge.js was not found.");
+    return;
+  }
+
+  try {
+    const healthResponse = await axios.get(`${serenaHttpBridgeUrl}/health`, {
+      timeout: 1500,
+      validateStatus: () => true,
+    });
+    if (healthResponse.status >= 200 && healthResponse.status < 300) {
+      console.log(`[Serena MCP] Shared HTTP bridge already reachable at ${serenaHttpBridgeUrl}`);
+      return;
+    }
+  } catch (_) {
+    // bridge not reachable yet; continue to spawn it
+  }
+
+  try {
+    const bridgeChild = spawn(process.execPath, [serenaHttpBridgeFile], {
+      cwd: __dirname,
+      stdio: "ignore",
+      detached: true,
+      shell: false,
+      env: {
+        ...process.env,
+        SERENA_MCP_URL: "",
+        SERENA_HTTP_BRIDGE_INTERNAL: "1",
+      },
+    });
+    bridgeChild.unref();
+    console.log(`[Serena MCP] Auto-wake requested for shared HTTP bridge at ${serenaHttpBridgeUrl}`);
+  } catch (err) {
+    console.warn("[Serena MCP] Auto-wake failed:", err?.message || err);
+  }
+}
+
+function serializeAgent(agent) {
+  return {
+    id: agent.id,
+    label: agent.label,
+    shortLabel: agent.shortLabel || agent.label,
+    description: agent.description || "",
+    kind: agent.kind || "builtin",
+    executionMode: agent.executionMode || "coding_agent",
+    marketplaceAvailable: agent.marketplaceAvailable !== false,
+    enabled: agent.enabled !== false,
+  };
+}
+
+function getVisibleAgents() {
+  return listAvailableAgents().filter((agent) => agent?.enabled !== false).map(serializeAgent);
+}
+
+function resolveAgentExecutionState({ selectedAgentId, model, agentMode, codingAgent, promptText = "" }) {
+  const selectedAgent = getAgentById(selectedAgentId);
+  const normalizedPrompt = String(promptText || "");
+  let resolvedModel = model;
+  let resolvedAgentMode = !!agentMode;
+  let resolvedCodingAgent = !!codingAgent;
+  let preferredExecution = null;
+
+  if (selectedAgent?.executionMode === "dino") {
+    resolvedModel = "dino";
+    resolvedAgentMode = true;
+    resolvedCodingAgent = false;
+    preferredExecution = "dino";
+  } else if (selectedAgent?.executionMode === "coding_agent") {
+    resolvedAgentMode = true;
+    resolvedCodingAgent = true;
+    preferredExecution = selectedAgent.kind === "builtin" ? "coding_agent" : "coding_profile";
+  }
+
+  return {
+    selectedAgent,
+    selectedAgentId: selectedAgent?.id || null,
+    agentInstruction: buildAgentInstruction(selectedAgent),
+    resolvedModel,
+    resolvedAgentMode,
+    resolvedCodingAgent,
+    preferredExecution,
+    autoCodeQuery: resolvedAgentMode && !resolvedCodingAgent && !selectedAgent && isCodeQuery(normalizedPrompt) >= 50,
+  };
+}
+
+function logAgentExecution(routeLabel, agentExecution, options = {}) {
+  const selectedAgent = agentExecution?.selectedAgent || null;
+  const selectedAgentId = agentExecution?.selectedAgentId || "none";
+  const runtime = agentExecution?.preferredExecution || (agentExecution?.resolvedCodingAgent ? "coding_agent" : (agentExecution?.resolvedAgentMode ? "dino" : "chat"));
+  const model = options.model || agentExecution?.resolvedModel || "unknown";
+  const thinking = options.thinking ? "on" : "off";
+  const deepSearch = options.deepSearch ? "on" : "off";
+  const lightning = options.lightning ? "on" : "off";
+  const autoCodeQuery = agentExecution?.autoCodeQuery ? "yes" : "no";
+  console.log(
+    `[Agent Execution] route=${routeLabel} agentId=${selectedAgentId} agentLabel="${selectedAgent?.label || "None"}" runtime=${runtime} model=${model} thinking=${thinking} deepSearch=${deepSearch} lightning=${lightning} autoCodeQuery=${autoCodeQuery}`
+  );
+}
+
+function maybeWakeDinoMcpDocker() {
+  if (!dinoMcpAutoWake || dinoMcpWakeAttempted) return;
+  dinoMcpWakeAttempted = true;
+
+  if (!fs.existsSync(dinoMcpComposeFile) || !fs.existsSync(dinoMcpComposeEnvFile)) {
+    console.warn("[Dino MCP] Auto-wake skipped because compose file or env file was not found.");
+    return;
+  }
+
+  try {
+    const dockerChild = spawn(
+      "docker",
+      ["compose", "--env-file", dinoMcpComposeEnvFile, "-f", dinoMcpComposeFile, "up", "-d", "postgres", "dino-mcp"],
+      {
+        cwd: __dirname,
+        stdio: "ignore",
+        detached: true,
+        shell: false,
+      }
+    );
+    dockerChild.unref();
+    console.log("[Dino MCP] Auto-wake requested for Docker MCP stack.");
+  } catch (err) {
+    console.warn("[Dino MCP] Auto-wake failed:", err?.message || err);
+  }
+}
+
+async function callDinoMcpHttpTool(name, args) {
+  const response = await axios.post(
+    `${dinoMcpHttpUrl}/tools/call`,
+    { name, arguments: args },
+    {
+      timeout: dinoMcpToolTimeoutMs,
+      headers: { "Content-Type": "application/json" },
+      validateStatus: () => true,
+    }
+  );
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(
+      `Dino MCP HTTP tool call failed (${response.status}): ${response.data?.error || response.statusText || "request error"}`
+    );
+  }
+
+  dinoMcpHttpDisabledUntil = 0;
+  return response.data?.data;
+}
+
+function createDinoMcpClient() {
+  const child = spawn(process.execPath, [path.join(__dirname, "mcp-server", "server.js")], {
+    cwd: __dirname,
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  let buffer = Buffer.alloc(0);
+  let nextId = 1;
+  const pending = new Map();
+  let closed = false;
+
+  const cleanupPending = (error) => {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  };
+
+  const handleMessage = (message) => {
+    const id = message?.id;
+    if (id == null || !pending.has(id)) return;
+    const { resolve, reject, timer } = pending.get(id);
+    clearTimeout(timer);
+    pending.delete(id);
+    if (message.error) {
+      reject(new Error(message.error?.message || "MCP tool error"));
+      return;
+    }
+    resolve(message.result);
+  };
+
+  const processStdout = () => {
+    while (true) {
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const headerText = buffer.slice(0, headerEnd).toString("utf8");
+      const contentLengthMatch = /Content-Length:\s*(\d+)/i.exec(headerText);
+      if (!contentLengthMatch) {
+        buffer = buffer.slice(headerEnd + 4);
+        continue;
+      }
+      const contentLength = Number.parseInt(contentLengthMatch[1], 10);
+      const totalLength = headerEnd + 4 + contentLength;
+      if (buffer.length < totalLength) return;
+      const payload = buffer.slice(headerEnd + 4, totalLength).toString("utf8");
+      buffer = buffer.slice(totalLength);
+      try {
+        handleMessage(JSON.parse(payload));
+      } catch (err) {
+        console.error("[Dino MCP] Failed to parse MCP response:", err?.message || err);
+      }
+    }
+  };
+
+  child.stdout.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+    processStdout();
+  });
+
+  child.stderr.on("data", (chunk) => {
+    const text = String(chunk || "").trim();
+    if (text) {
+      console.warn("[Dino MCP]", text);
+    }
+  });
+
+  child.on("error", (err) => {
+    closed = true;
+    dinoMcpClientPromise = null;
+    cleanupPending(err);
+  });
+
+  child.on("exit", (code, signal) => {
+    closed = true;
+    dinoMcpClientPromise = null;
+    cleanupPending(new Error(`MCP server exited (${code ?? "null"}${signal ? `, signal ${signal}` : ""})`));
+  });
+
+  const sendRequest = (method, params) =>
+    new Promise((resolve, reject) => {
+      if (closed || !child.stdin.writable) {
+        reject(new Error("MCP server is not running."));
+        return;
+      }
+
+      const id = nextId++;
+      const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+      const frame = `Content-Length: ${Buffer.byteLength(payload, "utf8")}\r\n\r\n${payload}`;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`MCP request timed out for ${method}`));
+      }, dinoMcpToolTimeoutMs);
+
+      pending.set(id, { resolve, reject, timer });
+      child.stdin.write(frame, "utf8", (err) => {
+        if (!err) return;
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(err);
+      });
+    });
+
+  return {
+    async initialize() {
+      await sendRequest("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "fubotics-chat-backend", version: "1.0.0" },
+      });
+      child.stdin.write(
+        `Content-Length: ${Buffer.byteLength(
+          JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }),
+          "utf8"
+        )}\r\n\r\n${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}`,
+        "utf8"
+      );
+      return this;
+    },
+    async callTool(name, args) {
+      const result = await sendRequest("tools/call", { name, arguments: args });
+      const text = result?.content?.find?.((item) => item?.type === "text")?.text || "";
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        return text;
+      }
+    },
+  };
+}
+
+async function getDinoMcpClient() {
+  if (!dinoUseMcpTools) {
+    throw new Error("Dino MCP tools are disabled.");
+  }
+  maybeWakeDinoMcpDocker();
+
+  if (shouldTryDinoMcpHttp()) {
+    return {
+      async callTool(name, args) {
+        try {
+          return await callDinoMcpHttpTool(name, args);
+        } catch (err) {
+          markDinoMcpHttpUnavailable(err);
+          const localClient = await getLocalDinoMcpClient();
+          return await localClient.callTool(name, args);
+        }
+      },
+    };
+  }
+
+  return await getLocalDinoMcpClient();
+}
+
+async function getLocalDinoMcpClient() {
+  if (!dinoMcpClientPromise) {
+    dinoMcpClientPromise = createDinoMcpClient()
+      .initialize()
+      .catch((err) => {
+        dinoMcpClientPromise = null;
+        throw err;
+      });
+  }
+  return dinoMcpClientPromise;
+}
+
+async function executeDinoToolLocally(name, args, userId, sessionId, deepSearchWebFn) {
+  if (name === "search_rag") {
+    const ragResult = await buildRagContext(userId, sessionId, String(args.query || ""), 8);
+    return {
+      display: ragResult.context || "No relevant information found in the knowledge base.",
+      raw: ragResult,
+    };
+  }
+
+  if (name === "deep_search_web") {
+    const sources = await deepSearchWebFn(String(args.query || ""));
+    if (sources && sources.length > 0) {
+      await indexWebSourcesForRag(userId, sessionId, sources);
+    }
+    return {
+      display:
+        sources && sources.length > 0
+          ? sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n")
+          : "No results found on the web.",
+      raw: { sources: sources || [] },
+    };
+  }
+
+  if (name === "store_knowledge") {
+    const title = String(args.title || "Insight").slice(0, 200);
+    const stored = await storeLearnedKnowledgeEntry(
+      userId,
+      sessionId,
+      {
+        title,
+        content: String(args.content || "").slice(0, 20000),
+        summary: String(args.summary || ""),
+        reusableInsight: String(args.reusableInsight || ""),
+        applicableWhen: String(args.applicableWhen || ""),
+        actionPattern: String(args.actionPattern || ""),
+        evidence: String(args.evidence || ""),
+        tags: Array.isArray(args.tags) ? args.tags.map((t) => String(t)) : [],
+        knowledgeKind: String(args.knowledgeKind || "general").slice(0, 80),
+      },
+      {
+        sourceAgent: "Dino 1.0",
+        sourceModel: CHAT_MODELS.dino?.model || "",
+        learningSource: "dino_tool_store",
+        fallbackTitle: title,
+      }
+    );
+    return {
+      display: `Stored: "${title}".${stored?.chunkCount ? ` (${stored.chunkCount} chunks)` : ""}` ,
+      raw: { stored: true, sourceId: stored?.sourceId || null, title, chunkCount: stored?.chunkCount || 0 },
+    };
+  }
+
+  if (name === "store_code_knowledge") {
+    return await executeDinoToolLocally(
+      "store_knowledge",
+      {
+        ...args,
+        knowledgeKind: String(args.knowledgeKind || "code_analysis"),
+        tags: Array.isArray(args.tags) ? Array.from(new Set([...args.tags.map((tag) => String(tag)), "codebase"])) : ["codebase"],
+      },
+      userId,
+      sessionId,
+      deepSearchWebFn
+    );
+  }
+
+  if (name === "list_project_files") {
+    const raw = await listProjectFiles(args || {});
+    return {
+      display: formatDinoMcpToolResult(name, raw, args),
+      raw,
+    };
+  }
+
+  if (name === "search_codebase") {
+    const raw = await searchCodebase(args || {});
+    return {
+      display: formatDinoMcpToolResult(name, raw, args),
+      raw,
+    };
+  }
+
+  if (name === "read_project_file") {
+    const raw = await readProjectFile(args || {});
+    return {
+      display: formatDinoMcpToolResult(name, raw, args),
+      raw,
+    };
+  }
+
+  return {
+    display: `Unknown tool: ${name}`,
+    raw: null,
+  };
+}
+
+function formatDinoMcpToolResult(name, raw, fallbackArgs) {
+  if (name === "search_rag") {
+    return raw?.context || "No relevant information found in the knowledge base.";
+  }
+  if (name === "deep_search_web") {
+    const sources = Array.isArray(raw?.sources) ? raw.sources : [];
+    return sources.length > 0
+      ? sources
+          .map((s) => {
+            const headings = Array.isArray(s?.structure?.headings) && s.structure.headings.length > 0
+              ? `\nHeadings: ${s.structure.headings.join(" | ")}`
+              : "";
+            const keyPoints = Array.isArray(s?.structure?.keyPoints) && s.structure.keyPoints.length > 0
+              ? `\nKey Points: ${s.structure.keyPoints.join(" | ")}`
+              : "";
+            return `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}${headings}${keyPoints}`;
+          })
+          .join("\n\n")
+      : "No results found on the web.";
+  }
+  if (name === "store_knowledge" || name === "store_code_knowledge") {
+    const title = String(raw?.title || fallbackArgs?.title || "Insight");
+    return `Stored: "${title}".`;
+  }
+  if (name === "list_project_files") {
+    const files = Array.isArray(raw?.files) ? raw.files : [];
+    return files.length > 0 ? files.map((item) => item.path).join("\n") : "No matching project files found.";
+  }
+  if (name === "search_codebase") {
+    const matches = Array.isArray(raw?.matches) ? raw.matches : [];
+    return matches.length > 0
+      ? matches.map((item) => `${item.path}:${item.line}\n${item.snippet}`).join("\n\n")
+      : "No matching code results found.";
+  }
+  if (name === "read_project_file") {
+    return raw?.content || "No file content returned.";
+  }
+  if (name === "run_project_checks") {
+    const checks = Array.isArray(raw?.checks) ? raw.checks : [];
+    return checks.length > 0
+      ? checks
+          .map((check) =>
+            `${check.ok ? "PASS" : "FAIL"} ${check.label}\nCommand: ${check.command}\n${compactDinoEvidence(
+              check.stderr || check.stdout || check.error || "",
+              900
+            )}`
+          )
+          .join("\n\n")
+      : "No project checks were run.";
+  }
+  return typeof raw === "string" ? raw : JSON.stringify(raw || {});
+}
+
+async function executeDinoTool(name, args, userId, sessionId, deepSearchWebFn) {
+  if (isSerenaCodeTool(name)) {
+    try {
+      const serenaResult = await executeSerenaCodeTool(name, args || {});
+      if (serenaResult) {
+        console.info(`[Serena MCP] ${name} executed via Serena requestedBy=Dino Agent.`);
+        return {
+          display: serenaResult.display,
+          raw: serenaResult.raw,
+          via: "serena",
+        };
+      }
+    } catch (err) {
+      console.warn(`[Serena MCP] Falling back to Dino MCP/local for ${name} requestedBy=Dino Agent:`, err?.message || err);
+    }
+  }
+
+  try {
+    const client = await getDinoMcpClient();
+    const toolArgs =
+      name === "deep_search_web" &&
+      (!args || args.maxResults == null) &&
+      Number.isInteger(deepSearchWebFn?.maxResults)
+        ? { ...args, maxResults: deepSearchWebFn.maxResults }
+        : args;
+    const raw = await client.callTool(name, {
+      ...toolArgs,
+      userId,
+      sessionId,
+    });
+    return {
+      display: formatDinoMcpToolResult(name, raw, toolArgs),
+      raw,
+      via: "mcp",
+    };
+  } catch (err) {
+    console.warn(`[Dino MCP] Falling back to local tool execution for ${name}:`, err?.message || err);
+    const local = await executeDinoToolLocally(name, args, userId, sessionId, deepSearchWebFn);
+    return {
+      ...local,
+      via: "local",
+    };
+  }
+}
 
 function extractFirstJsonObject(text) {
   const raw = String(text || "").trim();
@@ -1927,13 +2827,179 @@ function extractFirstJsonObject(text) {
   return null;
 }
 
-async function runDinoAgentLoopManual(userId, sessionId, historyMessages, userQuery, deepSearchWebFn) {
+function compactDinoEvidence(text, limit = 2400) {
+  return String(text || "")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim()
+    .slice(0, limit);
+}
+
+function isCodeAgentQuery(query) {
+  const text = String(query || "").toLowerCase();
+  if (!text) return false;
+  return /(\bcode\b|\bfile\b|\bfunction\b|\bapi\b|\broute\b|\bserver\b|\bfrontend\b|\bbackend\b|\bcomponent\b|\bcss\b|\bjsx\b|\bjs\b|\bts\b|\bbug\b|\berror\b|\bstack\b|\bfix\b|\brefactor\b|\bimplement\b|\bclass\b|\bservice\b|\bcontroller\b|\bmodel\b|\bschema\b|\bdatabase\b|\bpostgres\b|\bexpress\b|\breact\b|\bvite\b)/i.test(
+    text
+  );
+}
+
+function isProjectCheckQuery(query) {
+  const text = String(query || "").toLowerCase();
+  if (!text) return false;
+  return /(\btest\b|\btesting\b|\blint\b|\bbuild\b|\bsyntax\b|\bcompile\b|\bcheck\b|\bvalidate\b|\bregression\b|\bbug\b|\berror\b|\bfailing\b)/i.test(
+    text
+  );
+}
+
+function inferKnowledgeStoreTool(payload = {}) {
+  const kind = String(payload.knowledgeKind || "").toLowerCase();
+  if (kind.startsWith("code") || kind.includes("architecture") || kind.includes("bug") || kind.includes("refactor")) {
+    return "store_code_knowledge";
+  }
+  return "store_knowledge";
+}
+
+function formatLearnedKnowledgeContent({
+  summary = "",
+  reusableInsight = "",
+  applicableWhen = "",
+  actionPattern = "",
+  evidence = "",
+  sourceAgent = "Dino 1.0",
+  sourceModel = "",
+} = {}) {
+  const sections = [
+    summary ? `Summary:
+${summary}` : "",
+    reusableInsight ? `Reusable Insight:
+${reusableInsight}` : "",
+    applicableWhen ? `Applicable When:
+${applicableWhen}` : "",
+    actionPattern ? `Action Pattern:
+${actionPattern}` : "",
+    evidence ? `Evidence:
+${compactDinoEvidence(evidence, 2400)}` : "",
+    `Captured By:
+${sourceAgent}${sourceModel ? ` (${sourceModel})` : ""}`,
+  ].filter(Boolean);
+  return sections.join("\n\n").trim();
+}
+
+async function storeLearnedKnowledgeEntry(userId, sessionId, payload = {}, options = {}) {
+  const title = String(payload.title || options.fallbackTitle || "Insight").trim().slice(0, 200);
+  if (!title) return null;
+
+  const formattedContent = formatLearnedKnowledgeContent({
+    summary: payload.summary || "",
+    reusableInsight: payload.reusableInsight || payload.content || "",
+    applicableWhen: payload.applicableWhen || "",
+    actionPattern: payload.actionPattern || "",
+    evidence: payload.evidence || payload.content || "",
+    sourceAgent: options.sourceAgent || "Dino 1.0",
+    sourceModel: options.sourceModel || "",
+  });
+
+  const safeContent = formattedContent.slice(0, 20000).trim();
+  if (!safeContent) return null;
+
+  const tags = Array.isArray(payload.tags) ? payload.tags.map((t) => String(t)).filter(Boolean).slice(0, 12) : [];
+  const knowledgeKind = String(payload.knowledgeKind || options.knowledgeKind || "general").trim().slice(0, 80) || "general";
+
+  const source = await knowledgeSourceModel.createInsight(userId, sessionId, title, safeContent, {
+    tags,
+    knowledge_kind: knowledgeKind,
+    learned_from_interaction: true,
+    agent: options.sourceAgent || "Dino 1.0",
+    source_model: options.sourceModel || null,
+    learning_source: options.learningSource || "chat_turn",
+    source_agent_id: options.sourceAgentId || null,
+  });
+
+  const chunks = chunkText(safeContent, { chunkSize: 1400, overlap: 180 }).map((chunk) => ({
+    ...chunk,
+    metadata: {
+      ...(chunk.metadata || {}),
+      title,
+      knowledge_kind: knowledgeKind,
+      tags,
+      source_agent: options.sourceAgent || "Dino 1.0",
+      source_model: options.sourceModel || null,
+      learning_source: options.learningSource || "chat_turn",
+      source_agent_id: options.sourceAgentId || null,
+    },
+  }));
+
+  await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+  return { sourceId: source.id, title, chunkCount: chunks.length, knowledgeKind };
+}
+
+function formatSourcesForDinoPrompt(sources = [], limit = 3) {
+  return (Array.isArray(sources) ? sources : [])
+    .slice(0, limit)
+    .map((s, idx) => {
+      const title = String(s?.title || "Untitled").trim();
+      const url = String(s?.url || "").trim();
+      const snippet = compactDinoEvidence(s?.snippet || s?.content || "", 320);
+      return `[WEB ${idx + 1}] ${title}${url ? ` (${url})` : ""}\n${snippet}`;
+    })
+    .join("\n\n");
+}
+
+function buildDinoToolResultMessage(name, result) {
+  if (name === "deep_search_web") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 3200)}\n\nUse only the strongest facts from these sources in your final answer.`;
+  }
+  if (name === "search_rag") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 2600)}\n\nUse this as grounding, not as text to repeat verbatim.`;
+  }
+  if (name === "search_codebase") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 2600)}\n\nUse these matches to reason about the current implementation before answering.`;
+  }
+  if (name === "read_project_file") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 3200)}\n\nUse this file content carefully and cite file paths or line references when relevant.`;
+  }
+  if (name === "list_project_files") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 1400)}\n\nUse these paths to decide which file to inspect next.`;
+  }
+  if (name === "run_project_checks") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 2800)}\n\nUse failed checks to identify concrete code errors, regressions, or build issues before answering.`;
+  }
+  if (name === "store_knowledge" || name === "store_code_knowledge") {
+    return `Tool result (${name}):\n${compactDinoEvidence(result, 400)}`;
+  }
+  return `Tool result (${name}):\n${compactDinoEvidence(result, 1800)}`;
+}
+
+async function runDinoAgentLoopManual(
+  userId,
+  sessionId,
+  historyMessages,
+  userQuery,
+  deepSearchWebFn,
+  { lightning = false, thinking = false, deepSearch = false } = {}
+) {
   let iterations = 0;
+  const answerProfile = resolveAnswerProfile({
+    promptText: String(userQuery || ""),
+    usesWeb: deepSearch,
+    usesAgentLoop: true,
+    thinking,
+    lightning,
+    requestedMaxTokens: aiDeepSearchMaxTokens,
+  });
 
   const conversationHistory = (historyMessages || []).map((m) => ({
     role: m.role,
     content: m.content || "",
   }));
+  const proactiveWebGrounding = shouldProactivelyGroundDinoWeb({
+    query: userQuery,
+    deepSearch,
+    lightning,
+    thinking,
+    agentMode: true,
+  });
 
   const systemMessage = {
     role: "system",
@@ -1942,9 +3008,14 @@ async function runDinoAgentLoopManual(userId, sessionId, historyMessages, userQu
 You do NOT have native tool-calling support. You must follow this JSON protocol exactly (no markdown, no extra text):
 
 If you need a tool:
-{"action":"tool","name":"deep_search_web","arguments":{"query":"..."}} OR
+{"action":"tool","name":"deep_search_web","arguments":{"query":"...","maxResults":3}} OR
 {"action":"tool","name":"search_rag","arguments":{"query":"..."}} OR
-{"action":"tool","name":"store_knowledge","arguments":{"title":"...","content":"...","tags":["..."]}}
+{"action":"tool","name":"search_codebase","arguments":{"query":"...","fileHint":"optional"}} OR
+{"action":"tool","name":"read_project_file","arguments":{"path":"...","startLine":1,"endLine":160}} OR
+{"action":"tool","name":"list_project_files","arguments":{"query":"optional"}} OR
+{"action":"tool","name":"run_project_checks","arguments":{"scope":"quick","includeBuild":false}} OR
+{"action":"tool","name":"store_knowledge","arguments":{"title":"...","content":"...","tags":["..."]}} OR
+{"action":"tool","name":"store_code_knowledge","arguments":{"title":"...","content":"...","tags":["..."],"knowledgeKind":"code_analysis"}}
 
 If you are ready to answer:
 {"action":"final","content":"...final answer..."}
@@ -1952,7 +3023,15 @@ If you are ready to answer:
 Rules:
 1. Use deep_search_web for up-to-date info.
 2. Use search_rag for uploaded files or stored knowledge.
-3. Use store_knowledge only for durable reusable insights (no secrets).`,
+3. Use search_codebase, read_project_file, and list_project_files for repository questions, server behavior, routes, bugs, UI, and implementation details.
+4. Use run_project_checks when the user asks about code errors, test failures, lint, build issues, or regressions.
+5. Use store_knowledge only for durable reusable research insights (no secrets).
+6. Use store_code_knowledge for durable code analysis, architecture notes, bug findings, refactor ideas, and implementation plans.
+7. Prefer one tool call at a time, then finalize promptly once you have enough evidence.
+8. ${thinking ? "Thinking mode is ON. Spend extra effort on reasoning quality before finalizing." : "When enough evidence is gathered, finalize instead of exploring further."}
+9. ${deepSearch ? "Deep research is ON. Prefer fresh web grounding early when current information could matter." : proactiveWebGrounding ? "Agent web grounding is recommended for this request. Start with one compact web retrieval before finalizing if it can improve freshness or breadth." : "Avoid unnecessary web calls unless freshness is clearly needed."}
+10. ${lightning ? "Lightning mode is ON. Minimize tool usage, favor one high-value retrieval, and keep the final answer short and precise." : "Use the evidence budget fully when the question benefits from it."}
+11. ${answerProfile.conversationState.likelyCasual ? "This looks like a normal chat turn. Avoid unnecessary web or code exploration unless the user clearly asks for it." : "Escalate tool usage only when it materially improves the answer."}`,
   };
 
   if (conversationHistory[0]?.role !== "system") {
@@ -1961,7 +3040,65 @@ Rules:
     conversationHistory[0] = systemMessage;
   }
 
-  if (dinoAlwaysWeb) {
+  try {
+    const ragResult = await buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit);
+    if (ragResult?.context) {
+      conversationHistory.splice(1, 0, {
+        role: "system",
+        content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`,
+      });
+    }
+  } catch (err) {
+    console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
+  }
+
+  if (isCodeAgentQuery(userQuery)) {
+    try {
+      const codePrefetch = await executeDinoTool(
+        "search_codebase",
+        {
+          query: String(userQuery || "").slice(0, 240),
+          limit: answerProfile.codePrefetchLimit,
+        },
+        userId,
+        sessionId,
+        deepSearchWebFn
+      );
+      if (codePrefetch?.display) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nUse code tools if you need deeper inspection.`,
+        });
+      }
+    } catch (err) {
+      console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
+    }
+  }
+
+  if (isProjectCheckQuery(userQuery)) {
+    try {
+      const checkPrefetch = await executeDinoTool(
+        "run_project_checks",
+        {
+          scope: "quick",
+          includeBuild: false,
+        },
+        userId,
+        sessionId,
+        deepSearchWebFn
+      );
+      if (checkPrefetch?.display) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`,
+        });
+      }
+    } catch (err) {
+      console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
+    }
+  }
+
+  if (proactiveWebGrounding) {
     const preSources = await deepSearchWebFn(String(userQuery || "").trim());
     if (preSources && preSources.length > 0) {
       try {
@@ -1970,7 +3107,7 @@ Rules:
         console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
       }
       const sourceLines = preSources
-        .slice(0, deepSearchMaxResults)
+        .slice(0, answerProfile.sourceSliceLimit)
         .map(
           (s) =>
             `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
@@ -1988,12 +3125,12 @@ Rules:
 
   conversationHistory.push({ role: "user", content: String(userQuery || "").slice(0, 12000) });
 
-  while (iterations < dinoAgentMaxIterations) {
+  while (iterations < answerProfile.agentMaxIterations) {
     iterations += 1;
 
     const assistantMessage = await sendDinoChatMessage(conversationHistory, {
-      maxTokens: aiDeepSearchMaxTokens,
-      temperature: 0.4,
+      maxTokens: answerProfile.maxTokens,
+      temperature: lightning ? 0.25 : thinking ? 0.3 : 0.4,
       tools: null,
       toolChoice: null,
     });
@@ -2009,51 +3146,36 @@ Rules:
     const name = String(parsed.name || "").trim();
     const args = parsed.arguments && typeof parsed.arguments === "object" ? parsed.arguments : {};
     let result = "";
-
     try {
-      if (name === "search_rag") {
-        const ragResult = await buildRagContext(userId, sessionId, String(args.query || ""), 8);
-        result = ragResult.context || "No relevant information found in the knowledge base.";
-      } else if (name === "deep_search_web") {
-        const sources = await deepSearchWebFn(String(args.query || ""));
-        if (sources && sources.length > 0) {
-          await indexWebSourcesForRag(userId, sessionId, sources);
-          result = sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n");
-        } else {
-          result = "No results found on the web.";
-        }
-      } else if (name === "store_knowledge") {
-        const title = String(args.title || "Insight").slice(0, 200);
-        const body = String(args.content || "").slice(0, 20000);
-        const source = await knowledgeSourceModel.createInsight(userId, sessionId, title, body, {
-          tags: Array.isArray(args.tags) ? args.tags.map((t) => String(t)) : [],
-          learned_from_interaction: true,
-          agent: "Dino 1.0",
-        });
-        const chunks = [
-          {
-            chunk_index: 0,
-            content: body,
-            token_count: body.split(/\\s+/).filter(Boolean).length,
-            metadata: { title },
-          },
-        ];
-        await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
-        result = `Stored: "${title}".`;
-      } else {
-        result = `Unknown tool: ${name}`;
-      }
+      const toolRun = await executeDinoTool(name, args, userId, sessionId, deepSearchWebFn);
+      result = toolRun.display;
     } catch (err) {
       result = `Error executing ${name}: ${err.message}`;
     }
 
     conversationHistory.push({
       role: "system",
-      content: `Tool result (${name}):\n${String(result || "").slice(0, 12000)}`,
+      content: buildDinoToolResultMessage(name, result),
     });
   }
+  const finalizeMessage = await sendDinoChatMessage(
+    [
+      ...conversationHistory,
+      {
+        role: "system",
+        content:
+          "Finalize now. Do not call any tools. Answer the user's last request directly using the evidence already collected.",
+      },
+    ],
+    {
+      maxTokens: answerProfile.finalizeMaxTokens,
+      temperature: 0.3,
+      tools: null,
+      toolChoice: null,
+    }
+  );
 
-  return "I could not finish within the agent iteration limit. Please refine the question.";
+  return String(finalizeMessage?.content || "").trim() || "I could not finish within the agent iteration limit. Please refine the question.";
 }
 
 async function runDinoAgentLoop(
@@ -2062,14 +3184,29 @@ async function runDinoAgentLoop(
   historyMessages,
   userQuery,
   deepSearchWebFn,
-  { returnTranscript = false } = {}
+  { returnTranscript = false, lightning = false, thinking = false, deepSearch = false } = {}
 ) {
   let iterations = 0;
+  const answerProfile = resolveAnswerProfile({
+    promptText: String(userQuery || ""),
+    usesWeb: deepSearch,
+    usesAgentLoop: true,
+    thinking,
+    lightning,
+    requestedMaxTokens: aiDeepSearchMaxTokens,
+  });
 
   const conversationHistory = (historyMessages || []).map((m) => ({
     role: m.role,
     content: m.content || "",
   }));
+  const proactiveWebGrounding = shouldProactivelyGroundDinoWeb({
+    query: userQuery,
+    deepSearch,
+    lightning,
+    thinking,
+    agentMode: true,
+  });
 
   const systemMessage = {
     role: "system",
@@ -2080,14 +3217,81 @@ Core loop: Think -> Act -> Observe -> Finalize.
 Rules:
 1. Use 'deep_search_web' for any question that could benefit from up-to-date info.
 2. Use 'search_rag' to ground answers in stored sources and uploaded files when relevant.
-3. Use 'store_knowledge' to save durable insights learned from the web or reasoning.`,
+3. Use 'search_codebase', 'read_project_file', and 'list_project_files' for code, server, route, UI, bug, or architecture questions.
+4. Use 'run_project_checks' when the user asks about code errors, failing behavior, lint, build, tests, or regressions.
+5. Use 'store_knowledge' to save durable insights learned from the web or reasoning.
+6. Use 'store_code_knowledge' to save durable code analysis, implementation ideas, architecture notes, or bug findings.
+7. Keep tool use sparse: use at most one high-value tool at a time and finalize as soon as you have enough evidence.
+8. In your final answer, answer directly first, then cite supporting evidence briefly and mention relevant files when appropriate.
+9. ${thinking ? "Thinking mode is ON. Increase reasoning depth and synthesis quality before finalizing." : "When enough evidence is gathered, stop calling tools and answer."}
+10. ${deepSearch ? "Deep research is ON. Use web grounding proactively when recency or breadth can improve the answer." : proactiveWebGrounding ? "Agent web grounding is recommended for this request. Start with one compact web retrieval before finalizing if it can improve freshness or breadth." : "Only call deep_search_web when current information is truly needed."}
+11. ${lightning ? "Lightning mode is ON. Prefer one decisive retrieval, use the smallest sufficient context window, and finalize quickly." : "Use the available context budget when it helps answer quality."}
+12. ${answerProfile.conversationState.likelyCasual ? "If the user is just chatting or asking a simple question, answer directly and skip tool calls unless freshness or repository detail is clearly needed." : "Use tools only when they clearly sharpen the answer."}`,
   };
 
   if (conversationHistory[0]?.role !== "system") {
     conversationHistory.unshift(systemMessage);
   }
 
-  if (dinoAlwaysWeb) {
+  try {
+    const ragResult = await buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit);
+    if (ragResult?.context) {
+      conversationHistory.splice(1, 0, {
+        role: "system",
+        content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`,
+      });
+    }
+  } catch (err) {
+    console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
+  }
+
+  if (isCodeAgentQuery(userQuery)) {
+    try {
+      const codePrefetch = await executeDinoTool(
+        "search_codebase",
+        {
+          query: String(userQuery || "").slice(0, 240),
+          limit: answerProfile.codePrefetchLimit,
+        },
+        userId,
+        sessionId,
+        deepSearchWebFn
+      );
+      if (codePrefetch?.display) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nPrefer code tools for repository questions; use web only when freshness matters.`,
+        });
+      }
+    } catch (err) {
+      console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
+    }
+  }
+
+  if (isProjectCheckQuery(userQuery)) {
+    try {
+      const checkPrefetch = await executeDinoTool(
+        "run_project_checks",
+        {
+          scope: "quick",
+          includeBuild: false,
+        },
+        userId,
+        sessionId,
+        deepSearchWebFn
+      );
+      if (checkPrefetch?.display) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`,
+        });
+      }
+    } catch (err) {
+      console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
+    }
+  }
+
+  if (proactiveWebGrounding) {
     const preSources = await deepSearchWebFn(String(userQuery || "").trim());
     if (preSources && preSources.length > 0) {
       try {
@@ -2096,7 +3300,7 @@ Rules:
         console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
       }
       const sourceLines = preSources
-        .slice(0, deepSearchMaxResults)
+        .slice(0, answerProfile.sourceSliceLimit)
         .map(
           (s) =>
             `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
@@ -2107,25 +3311,34 @@ Rules:
         .join("\n");
       conversationHistory.splice(1, 0, {
         role: "system",
-        content: `Web sources pre-fetched for grounding:\n${sourceLines}\n\nPrefer citing these or using deep_search_web for more.`,
+        content: `Web sources pre-fetched for grounding:\n${compactDinoEvidence(sourceLines, 1800)}\n\nPrefer citing these or using deep_search_web for more.`,
       });
     }
   }
 
-  while (iterations < dinoAgentMaxIterations) {
+  conversationHistory.push({
+    role: "user",
+    content: String(userQuery || "").slice(0, 12000),
+  });
+
+  while (iterations < answerProfile.agentMaxIterations) {
     iterations += 1;
 
     let assistantMessage;
     try {
       assistantMessage = await sendDinoChatMessage(conversationHistory, {
-        maxTokens: aiDeepSearchMaxTokens,
-        temperature: 0.5,
+        maxTokens: answerProfile.maxTokens,
+        temperature: lightning ? 0.3 : thinking ? 0.38 : 0.5,
         tools: DINO_AGENT_TOOLS,
         toolChoice: "auto",
       });
     } catch (err) {
       if (isAutoToolChoiceUnsupportedError(err)) {
-        return await runDinoAgentLoopManual(userId, sessionId, historyMessages, userQuery, deepSearchWebFn);
+        return await runDinoAgentLoopManual(userId, sessionId, historyMessages, userQuery, deepSearchWebFn, {
+          lightning,
+          thinking,
+          deepSearch,
+        });
       }
       throw err;
     }
@@ -2163,36 +3376,8 @@ Rules:
 
       let result = "";
       try {
-        if (name === "search_rag") {
-          const ragResult = await buildRagContext(userId, sessionId, args.query, 8);
-          result = ragResult.context || "No relevant information found in the knowledge base.";
-        } else if (name === "deep_search_web") {
-          const sources = await deepSearchWebFn(args.query);
-          if (sources && sources.length > 0) {
-            await indexWebSourcesForRag(userId, sessionId, sources);
-            result = sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n");
-          } else {
-            result = "No results found on the web.";
-          }
-        } else if (name === "store_knowledge") {
-          const source = await knowledgeSourceModel.createInsight(userId, sessionId, args.title, args.content, {
-            tags: args.tags || [],
-            learned_from_interaction: true,
-            agent: "Dino 1.0",
-          });
-          const chunks = [
-            {
-              chunk_index: 0,
-              content: args.content,
-              token_count: String(args.content || "").split(/\\s+/).filter(Boolean).length,
-              metadata: { title: args.title },
-            },
-          ];
-          await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
-          result = `Stored: "${args.title}".`;
-        } else {
-          result = `Unknown tool: ${name}`;
-        }
+        const toolRun = await executeDinoTool(name, args, userId, sessionId, deepSearchWebFn);
+        result = toolRun.display;
       } catch (err) {
         result = `Error executing ${name}: ${err.message}`;
       }
@@ -2201,41 +3386,69 @@ Rules:
         role: "tool",
         tool_call_id: toolCall.id,
         name,
-        content: String(result),
+        content: compactDinoEvidence(result, name === "deep_search_web" ? (lightning ? 1800 : 3200) : lightning ? 1600 : 2400),
       });
     }
   }
 
+  const finalMessages = [
+    ...conversationHistory,
+    {
+      role: "system",
+      content:
+        "Finalize now. Do not call any tools. Answer the user's last request directly using the evidence already collected.",
+    },
+  ];
+  const finalAssistantMessage = await sendDinoChatMessage(finalMessages, {
+    maxTokens: answerProfile.finalizeMaxTokens,
+    temperature: 0.3,
+    tools: null,
+    toolChoice: null,
+  });
+
   if (returnTranscript) {
     return {
-      finalDraft: "I reached my reasoning limit without a final answer.",
-      conversationHistory,
+      finalDraft: String(finalAssistantMessage?.content || "").trim() || "I reached my reasoning limit without a final answer.",
+      conversationHistory: [
+        ...conversationHistory,
+        {
+          role: "assistant",
+          content: String(finalAssistantMessage?.content || "").trim(),
+        },
+      ],
     };
   }
-  return "I reached my reasoning limit without a final answer.";
+  return String(finalAssistantMessage?.content || "").trim() || "I reached my reasoning limit without a final answer.";
 }
 
-async function runDinoAgentLearning(userId, sessionId, userMessage, assistantReply) {
+async function runDinoAgentLearning(userId, sessionId, userMessage, assistantReply, options = {}) {
   try {
+    const sourceAgent = String(options.sourceAgent || "Dino 1.0").trim() || "Dino 1.0";
+    const sourceModel = String(options.sourceModel || "").trim();
+    const sourceAgentId = String(options.sourceAgentId || "").trim() || null;
+    const learningSource = String(options.learningSource || "chat_turn").trim() || "chat_turn";
     const learningPrompt = `You are Dino 1.0. Extract durable reusable knowledge from the interaction.
 
 Return ONLY valid JSON. No markdown, no extra text.
 
 If there is valuable reusable knowledge, return:
-{"title":"...","content":"...","tags":["optional","tags"]}
+{"title":"...","summary":"...","reusableInsight":"...","applicableWhen":"...","actionPattern":"...","evidence":"...","tags":["optional","tags"],"knowledgeKind":"general|code_analysis|architecture_note|bug_analysis|refactor_idea|workflow_pattern"}
 
 If there is nothing worth storing, return:
 null
 
 Constraints:
 - Do not store secrets, tokens, passwords, or private personal data.
-- Prefer short reusable procedures, architecture notes, or stable facts.
+- Prefer reusable procedures, architecture notes, debugging patterns, or stable facts.
+- If the interaction is about codebase behavior, bugs, UI, server behavior, implementation, workflow, or an agent strategy, make it structured and code-focused when appropriate.
+- Keep summary and reusableInsight compact but concrete.
 
-User: "${String(userMessage || "").slice(0, 2000)}"
-Assistant: "${String(assistantReply || "").slice(0, 6000)}"`;
+Source Agent: "${sourceAgent}"${sourceModel ? ` (${sourceModel})` : ""}
+User: "${String(userMessage || "").slice(0, 2400)}"
+Assistant: "${String(assistantReply || "").slice(0, 7000)}"`;
 
     const message = await sendDinoChatMessage([{ role: "system", content: learningPrompt }], {
-      maxTokens: 900,
+      maxTokens: 1100,
       temperature: 0.2,
       tools: null,
       toolChoice: null,
@@ -2243,28 +3456,17 @@ Assistant: "${String(assistantReply || "").slice(0, 6000)}"`;
 
     const parsed = extractFirstJsonObject(message?.content || "");
     if (!parsed) return;
-    const title = String(parsed.title || "").trim();
-    const content = String(parsed.content || "").trim();
-    if (!title || !content) return;
-
-    const tags = Array.isArray(parsed.tags) ? parsed.tags.map((t) => String(t)).slice(0, 12) : [];
-    const safeTitle = title.slice(0, 200);
-    const safeContent = content.slice(0, 20000);
-
-    const source = await knowledgeSourceModel.createInsight(userId, sessionId, safeTitle, safeContent, {
-      tags,
-      learned_from_interaction: true,
-      agent: "Dino 1.0",
+    const stored = await storeLearnedKnowledgeEntry(userId, sessionId, parsed, {
+      sourceAgent,
+      sourceModel,
+      sourceAgentId,
+      learningSource,
+      fallbackTitle: `${sourceAgent} insight`,
+      knowledgeKind: parsed?.knowledgeKind || "general",
     });
-    const chunks = [
-      {
-        chunk_index: 0,
-        content: safeContent,
-        token_count: safeContent.split(/\\s+/).filter(Boolean).length,
-        metadata: { title: safeTitle },
-      },
-    ];
-    await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+    if (stored) {
+      console.log(`[Dino Learning] Stored ${stored.title} in ${stored.chunkCount} chunks from ${sourceAgent}.`);
+    }
   } catch (err) {
     console.error("[Dino Learning] Failed:", err?.message || err);
   }
@@ -2338,15 +3540,59 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/models", (req, res) => {
-  if (CHAT_MODELS?.hf) {
-    CHAT_MODELS.hf.enabled = Boolean(hfToken) && !hfChatPermissionDenied;
+  if (CHAT_MODELS?.sambanova) {
+    CHAT_MODELS.sambanova.enabled = Boolean(sambaNovaApiKey);
   }
   const models = Object.values(CHAT_MODELS).map((item) => ({
     id: item.id,
     label: item.label,
     enabled: item.enabled,
+    annotation: MODEL_ANNOTATIONS[item.id] || null,
   }));
-  res.json({ models, defaultModel: defaultChatModel });
+  res.json({
+    models,
+    defaultModel: defaultChatModel,
+    agents: AGENT_ANNOTATIONS,
+    availableAgents: getVisibleAgents(),
+  });
+});
+
+app.get("/api/agents", (req, res) => {
+  res.json({ agents: getVisibleAgents() });
+});
+
+app.post("/api/token-policy/inspect", authMiddleware, async (req, res) => {
+  try {
+    const {
+      prompt = "",
+      model = defaultChatModel,
+      hasAttachments = false,
+      usesWeb = false,
+      usesAgentLoop = false,
+      lightningMode = false,
+      requestedMaxTokens = 0,
+    } = req.body || {};
+
+    const selectedModel = resolvePreferredChatModel(model);
+    const policy = classifyTokenBudget({
+      promptText: prompt,
+      hasAttachments: !!hasAttachments,
+      usesWeb: !!usesWeb,
+      usesAgentLoop: !!usesAgentLoop,
+      lightningMode: !!lightningMode,
+      requestedMaxTokens: Number(requestedMaxTokens) || 0,
+    });
+
+    res.json({
+      model: selectedModel,
+      modelAnnotation: MODEL_ANNOTATIONS[selectedModel] || null,
+      agentAnnotation: selectedModel === "dino" ? AGENT_ANNOTATIONS.dino_agent : null,
+      policy,
+    });
+  } catch (err) {
+    console.error("POST /api/token-policy/inspect error:", err);
+    res.status(500).json({ error: "Failed to inspect token policy" });
+  }
 });
 
 // Auth routes
@@ -2458,7 +3704,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
   }, 15000);
 
   try {
-    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode } = req.body || {};
+    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode, codingAgent, lightning } = req.body || {};
     const parsedSessionId = Number.parseInt(sessionId, 10);
     if (!Number.isInteger(parsedSessionId)) {
       sseSend(res, "error", { error: "Valid sessionId required" });
@@ -2649,8 +3895,14 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         }
       } else {
         // Agent mode: run tool/web loop, then stream the final answer so the UI updates token-by-token.
-        const agentResult = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb, {
+        const scopedDeepSearchWeb = (query) =>
+          deepSearchWeb(query, deepSearch ? deepSearchMaxResults : Math.min(2, deepSearchMaxResults));
+        scopedDeepSearchWeb.maxResults = deepSearch ? deepSearchMaxResults : Math.min(2, deepSearchMaxResults);
+        const agentResult = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, scopedDeepSearchWeb, {
           returnTranscript: true,
+          thinking: !!thinking,
+          deepSearch: !!deepSearch,
+          lightning: !!lightning,
         });
 
         const hasTranscript =
@@ -2720,7 +3972,12 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         }
 
         if (agentMode && dinoSelfLearningEnabled) {
-          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply).catch(console.error);
+          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply, {
+            sourceAgent: "Dino Agent",
+            sourceAgentId: agentExecution.selectedAgentId || "dino_agent",
+            sourceModel: selectedModel,
+            learningSource: "dino_agent_turn",
+          }).catch(console.error);
         }
       }
 
@@ -2735,7 +3992,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
       return res.end();
     }
 
-    // Standard models stream path (groq/hf).
+    // Standard models stream path (groq/sambanova).
     const history = await messageModel.getBySessionId(parsedSessionId);
     const sources = deepSearch ? await deepSearchWeb(content) : [];
     if (sources.length > 0) {
@@ -2808,7 +4065,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
     try {
       if (selectedModelId === "groq") {
         aiReply = await streamOpenAICompatibleChatCompletions({
-          url: `${groqBaseUrl}/chat/completions`,
+          url: `${sambaNovaBaseUrl}/chat/completions`,
           payload: {
             model: CHAT_MODELS.groq.model,
             messages: messagesForModel,
@@ -2817,7 +4074,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
             stream: true,
           },
           headers: {
-            Authorization: `Bearer ${groqApiKey}`,
+            Authorization: `Bearer ${sambaNovaApiKey}`,
             "Content-Type": "application/json",
           },
           timeoutMs: 45000,
@@ -2829,28 +4086,16 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
           signal: abortController.signal,
         });
       } else {
-        // Default to HF standard model for this stream route.
-        aiReply = await streamOpenAICompatibleChatCompletions({
-          url: `${hfRouterBaseUrl}/chat/completions`,
-          payload: {
-            model: CHAT_MODELS.hf.model,
-            messages: messagesForModel,
-            max_tokens: maxTokens,
-            temperature: 0.7,
-            stream: true,
-          },
-          headers: {
-            Authorization: `Bearer ${hfToken}`,
-            "Content-Type": "application/json",
-          },
-          timeoutMs: 60000,
-          providerLabel: "HF Router",
-          onDelta: (delta) => {
-            streamedAny = true;
-            sseSend(res, "delta", { delta });
-          },
-          signal: abortController.signal,
-        });
+        aiReply = await sendSambaNovaCompletion(
+          messagesForModel,
+          maxTokens,
+          0.7,
+          CHAT_MODELS.sambanova.model
+        );
+        if (aiReply) {
+          streamedAny = true;
+          sseSend(res, "delta", { delta: aiReply });
+        }
       }
     } catch (err) {
       const partial = String(err?.partialText || "");
@@ -2861,12 +4106,12 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         if (selectedModelId === "groq") {
           aiReply = await sendGroqCompletion(messagesForModel, maxTokens, 0.7);
         } else {
-          const msg = await sendHfRouterChatMessage(messagesForModel, {
+          aiReply = await sendSambaNovaCompletion(
+            messagesForModel,
             maxTokens,
-            temperature: 0.7,
-            model: CHAT_MODELS.hf.model,
-          });
-          aiReply = msg?.content || "";
+            0.7,
+            CHAT_MODELS.sambanova.model
+          );
         }
         if (aiReply) sseSend(res, "delta", { delta: aiReply });
       } else {
@@ -2941,7 +4186,23 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
 
 app.post("/api/messages", authMiddleware, async (req, res) => {
   try {
-    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode } = req.body;
+    const { sessionId, content, attachmentIds, deepSearch, thinking, model, agentMode, codingAgent, lightning, selectedAgentId } = req.body;
+    const agentExecution = resolveAgentExecutionState({
+      selectedAgentId,
+      model,
+      agentMode,
+      codingAgent,
+      promptText: content,
+    });
+    const effectiveModel = agentExecution.resolvedModel;
+    const effectiveAgentMode = agentExecution.resolvedAgentMode;
+    const effectiveCodingAgent = agentExecution.resolvedCodingAgent;
+    logAgentExecution("message", agentExecution, {
+      model: effectiveModel,
+      thinking: !!thinking,
+      deepSearch: !!deepSearch,
+      lightning: !!lightning,
+    });
     const parsedSessionId = Number.parseInt(sessionId, 10);
     if (!Number.isInteger(parsedSessionId)) {
       return res.status(400).json({ error: "Valid sessionId required" });
@@ -2954,6 +4215,21 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
     }
     
     const sessionAttachments = await attachmentModel.getBySessionId(parsedSessionId);
+    const answerProfile = resolveAnswerProfile({
+      promptText: content,
+      hasAttachments: sessionAttachments.length > 0 || (attachmentIds && attachmentIds.length > 0),
+      usesWeb: !!deepSearch,
+      usesAgentLoop: resolvePreferredChatModel(effectiveModel) === "dino" && (effectiveAgentMode || !!thinking),
+      thinking: !!thinking,
+      lightning: !!lightning,
+      requestedMaxTokens: deepSearch ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
+    });
+    const scopedDeepSearchWeb = (query) =>
+      deepSearchWeb(
+        query,
+        deepSearch || effectiveAgentMode || thinking ? answerProfile.webMaxResults : Math.min(2, answerProfile.webMaxResults)
+      );
+    scopedDeepSearchWeb.maxResults = answerProfile.webMaxResults;
     
     const messageId = await messageModel.create(parsedSessionId, "user", content);
     
@@ -3004,10 +4280,10 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
-    } else if (resolvePreferredChatModel(model) === "dino") {
-      console.log(`[Message Route] Dino Agent. Model: ${model}, Thinking: ${thinking}`);
+    } else if (resolvePreferredChatModel(effectiveModel) === "dino") {
+      console.log(`[Message Route] Dino Agent. Model: ${effectiveModel}, Thinking: ${thinking}, Agent: ${agentExecution.selectedAgentId || "none"}`);
       const history = await messageModel.getBySessionId(parsedSessionId);
-      const selectedModel = resolvePreferredChatModel(model);
+      const selectedModel = resolvePreferredChatModel(effectiveModel);
 
       if (!CHAT_MODELS.dino.enabled) {
         const assistantRecord = await messageModel.create(
@@ -3020,7 +4296,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       } else {
         let aiReply = "";
         if (!agentMode && !thinking) {
-          const sources = deepSearch ? await deepSearchWeb(content) : [];
+          const sources = deepSearch ? await scopedDeepSearchWeb(content) : [];
           if (sources.length > 0) {
             try {
               await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
@@ -3031,15 +4307,19 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
           const crossChatContext = shouldReviewAcrossChats(content)
             ? await getCrossChatContext(req.user.id, parsedSessionId)
             : "";
-          const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6);
+          const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, answerProfile.ragLimit);
           const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false);
+          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false, !!lightning);
         } else {
           try {
-            aiReply = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, deepSearchWeb);
+            aiReply = await runDinoAgentLoop(req.user.id, parsedSessionId, history, content, scopedDeepSearchWeb, {
+              lightning: !!lightning,
+              thinking: !!thinking,
+              deepSearch: !!deepSearch,
+            });
           } catch (err) {
             console.error("[Message Route] Dino agent failed:", err?.message || err);
-            const sources = await deepSearchWeb(content);
+            const sources = await scopedDeepSearchWeb(content);
             if (sources.length > 0) {
               try {
                 await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
@@ -3050,9 +4330,9 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
             const crossChatContext = shouldReviewAcrossChats(content)
               ? await getCrossChatContext(req.user.id, parsedSessionId)
               : "";
-            const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, 8);
+            const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, answerProfile.ragLimit);
             const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking);
+            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking, !!lightning);
           }
         }
 
@@ -3067,13 +4347,65 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
           await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
         }
 
-        if (agentMode && dinoSelfLearningEnabled) {
-          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply).catch(console.error);
+        if (effectiveAgentMode && dinoSelfLearningEnabled) {
+          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply, {
+            sourceAgent: "Dino Agent",
+            sourceAgentId: agentExecution.selectedAgentId || "dino_agent",
+            sourceModel: selectedModel,
+            learningSource: "dino_agent_turn",
+          }).catch(console.error);
+        }
+      }
+    } else if (agentExecution.preferredExecution === "coding_agent" || agentExecution.preferredExecution === "coding_profile" || ((effectiveCodingAgent && effectiveAgentMode) || agentExecution.autoCodeQuery)) {
+      console.log(`[Message Route] Coding Agent (selectedAgent: ${agentExecution.selectedAgentId || "none"}, explicit: ${!!effectiveCodingAgent}, auto-detected: ${agentExecution.autoCodeQuery})`);
+      const history = await messageModel.getBySessionId(parsedSessionId);
+      const selectedModel = "coding_agent";
+
+      if (!CHAT_MODELS.sambanova.enabled) {
+        const assistantRecord = await messageModel.create(
+          parsedSessionId,
+          "assistant",
+          'Coding Agent requires SAMBANOVA_API_KEY to be configured.',
+          selectedModel
+        );
+        void assistantRecord;
+      } else {
+        try {
+          const aiReply = await runCodingAgentLoop(req.user.id, parsedSessionId, history, selectedModel, {
+            agentInstruction: agentExecution.agentInstruction,
+            agentLabel: agentExecution.selectedAgent?.label || "Coding Agent",
+          });
+
+          const codeExport = await offloadLargeCodeBlocksToFiles(parsedSessionId, content, aiReply, 100);
+          const assistantRecord = await messageModel.create(
+            parsedSessionId,
+            "assistant",
+            codeExport.content,
+            selectedModel
+          );
+          for (const attachment of codeExport.attachments) {
+            await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+          }
+          runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply, {
+            sourceAgent: agentExecution.selectedAgent?.label || "Coding Agent",
+            sourceAgentId: agentExecution.selectedAgentId || "coding_agent",
+            sourceModel: selectedModel,
+            learningSource: "coding_agent_turn",
+          }).catch(console.error);
+        } catch (err) {
+          console.error("[Message Route] Coding agent failed:", err?.message || err);
+          const assistantRecord = await messageModel.create(
+            parsedSessionId,
+            "assistant",
+            `Coding Agent encountered an error: ${err?.message || "Unknown error"}`,
+            selectedModel
+          );
+          void assistantRecord;
         }
       }
     } else {
       const history = await messageModel.getBySessionId(parsedSessionId);
-      const sources = deepSearch ? await deepSearchWeb(content) : [];
+      const sources = deepSearch ? await scopedDeepSearchWeb(content) : [];
       if (sources.length > 0) {
         try {
           await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
@@ -3084,9 +4416,9 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(content)
         ? await getCrossChatContext(req.user.id, parsedSessionId)
         : "";
-      const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch || thinking ? 8 : 6);
+      const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, answerProfile.ragLimit);
       const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, effectiveModel, !!thinking, !!lightning);
 
       if (sources.length > 0) {
         const links = sources
@@ -3108,11 +4440,17 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
         parsedSessionId,
         "assistant",
         codeExport.content,
-        resolvePreferredChatModel(model)
+        resolvePreferredChatModel(effectiveModel)
       );
       for (const attachment of codeExport.attachments) {
         await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
       }
+      runDinoAgentLearning(req.user.id, parsedSessionId, content, aiReply, {
+        sourceAgent: agentExecution.selectedAgent?.label || "Chat Model",
+        sourceAgentId: agentExecution.selectedAgentId || null,
+        sourceModel: resolvePreferredChatModel(effectiveModel),
+        learningSource: "chat_model_turn",
+      }).catch(console.error);
     }
     
     const messages = await messageModel.getBySessionId(parsedSessionId);
@@ -3285,7 +4623,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
     }
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "hf").trim().toLowerCase();
+    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     // Anonymous chat: do not allow "Thinking mode" before login.
     const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
@@ -3313,8 +4651,9 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
 app.post("/api/incognito/chat", authMiddleware, async (req, res) => {
   try {
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "hf").trim().toLowerCase();
+    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     const thinking = !!req.body?.thinking;
+    const lightning = !!req.body?.lightning;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
     if (!content) return res.status(400).json({ error: "Message content is required" });
 
@@ -3324,7 +4663,7 @@ app.post("/api/incognito/chat", authMiddleware, async (req, res) => {
       .slice(-30);
     sanitizedHistory.push({ role: "user", content: content.slice(0, 12000) });
 
-    const assistant = await getAIReply(sanitizedHistory, [], [], "", model, thinking);
+    const assistant = await getAIReply(sanitizedHistory, [], [], "", model, thinking, lightning);
     res.json({ assistant });
   } catch (err) {
     console.error("POST /api/incognito/chat error:", err);
@@ -3338,7 +4677,7 @@ app.post("/api/public/chat", async (req, res) => {
       return res.status(403).json({ error: "Public chat is disabled for logged-in sessions" });
     }
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "hf").trim().toLowerCase();
+    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
     // Anonymous chat: do not allow "Thinking mode" before login.
     const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
@@ -3361,7 +4700,23 @@ app.post("/api/public/chat", async (req, res) => {
 app.put("/api/messages/:id", authMiddleware, async (req, res) => {
   try {
     const messageId = Number.parseInt(req.params.id, 10);
-    const { content, deepSearch, rewriteThread, thinking, model, agentMode } = req.body || {};
+    const { content, deepSearch, rewriteThread, thinking, model, agentMode, codingAgent, lightning, selectedAgentId } = req.body || {};
+    const agentExecution = resolveAgentExecutionState({
+      selectedAgentId,
+      model,
+      agentMode,
+      codingAgent,
+      promptText: content,
+    });
+    const effectiveModel = agentExecution.resolvedModel;
+    const effectiveAgentMode = agentExecution.resolvedAgentMode;
+    const effectiveCodingAgent = agentExecution.resolvedCodingAgent;
+    logAgentExecution("edit", agentExecution, {
+      model: effectiveModel,
+      thinking: !!thinking,
+      deepSearch: !!deepSearch,
+      lightning: !!lightning,
+    });
     if (!Number.isInteger(messageId) || !content || !String(content).trim()) {
       return res.status(400).json({ error: "Valid message id and content are required" });
     }
@@ -3389,6 +4744,21 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
     }
 
     const sessionAttachments = await attachmentModel.getBySessionId(targetMessage.session_id);
+    const answerProfile = resolveAnswerProfile({
+      promptText: normalizedContent,
+      hasAttachments: sessionAttachments.length > 0,
+      usesWeb: !!deepSearch,
+      usesAgentLoop: resolvePreferredChatModel(effectiveModel) === "dino" && (effectiveAgentMode || !!thinking),
+      thinking: !!thinking,
+      lightning: !!lightning,
+      requestedMaxTokens: deepSearch ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
+    });
+    const scopedDeepSearchWeb = (query) =>
+      deepSearchWeb(
+        query,
+        deepSearch || effectiveAgentMode || thinking ? answerProfile.webMaxResults : Math.min(2, answerProfile.webMaxResults)
+      );
+    scopedDeepSearchWeb.maxResults = answerProfile.webMaxResults;
     const generationType = detectGenerationRequest(normalizedContent);
     if (generationType) {
       let generatedAttachment = null;
@@ -3430,10 +4800,10 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       if (generatedAttachment) {
         await attachmentModel.linkToMessage(assistantId.id, generatedAttachment.id);
       }
-    } else if (resolvePreferredChatModel(model) === "dino") {
-      console.log(`[Edit Message Route] Dino Agent. Model: ${model}, Thinking: ${thinking}`);
+    } else if (resolvePreferredChatModel(effectiveModel) === "dino") {
+      console.log(`[Edit Message Route] Dino Agent. Model: ${effectiveModel}, Thinking: ${thinking}, Agent: ${agentExecution.selectedAgentId || "none"}`);
       const history = await messageModel.getBySessionId(targetMessage.session_id);
-      const selectedModel = resolvePreferredChatModel(model);
+      const selectedModel = resolvePreferredChatModel(effectiveModel);
 
       if (!CHAT_MODELS.dino.enabled) {
         const assistantRecord = await messageModel.create(
@@ -3446,7 +4816,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       } else {
         let aiReply = "";
         if (!agentMode && !thinking) {
-          const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
+          const sources = deepSearch ? await scopedDeepSearchWeb(normalizedContent) : [];
           if (sources.length > 0) {
             try {
               await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
@@ -3457,15 +4827,19 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
           const crossChatContext = shouldReviewAcrossChats(normalizedContent)
             ? await getCrossChatContext(req.user.id, targetMessage.session_id)
             : "";
-          const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, deepSearch ? 8 : 6);
+          const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit);
           const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false);
+          aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false, !!lightning);
         } else {
           try {
-            aiReply = await runDinoAgentLoop(req.user.id, targetMessage.session_id, history, normalizedContent, deepSearchWeb);
+            aiReply = await runDinoAgentLoop(req.user.id, targetMessage.session_id, history, normalizedContent, scopedDeepSearchWeb, {
+              lightning: !!lightning,
+              thinking: !!thinking,
+              deepSearch: !!deepSearch,
+            });
           } catch (err) {
             console.error("[Edit Message Route] Dino agent failed:", err?.message || err);
-            const sources = await deepSearchWeb(normalizedContent);
+            const sources = await scopedDeepSearchWeb(normalizedContent);
             if (sources.length > 0) {
               try {
                 await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
@@ -3476,9 +4850,9 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
             const crossChatContext = shouldReviewAcrossChats(normalizedContent)
               ? await getCrossChatContext(req.user.id, targetMessage.session_id)
               : "";
-            const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, 8);
+            const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit);
             const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking);
+            aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", !!thinking, !!lightning);
           }
         }
 
@@ -3493,13 +4867,65 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
           await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
         }
 
-        if (agentMode && dinoSelfLearningEnabled) {
-          runDinoAgentLearning(req.user.id, targetMessage.session_id, normalizedContent, aiReply).catch(console.error);
+        if (effectiveAgentMode && dinoSelfLearningEnabled) {
+          runDinoAgentLearning(req.user.id, targetMessage.session_id, normalizedContent, aiReply, {
+            sourceAgent: "Dino Agent",
+            sourceAgentId: agentExecution.selectedAgentId || "dino_agent",
+            sourceModel: selectedModel,
+            learningSource: "dino_agent_turn",
+          }).catch(console.error);
+        }
+      }
+    } else if (agentExecution.preferredExecution === "coding_agent" || agentExecution.preferredExecution === "coding_profile" || ((effectiveCodingAgent && effectiveAgentMode) || agentExecution.autoCodeQuery)) {
+      console.log(`[Edit Message Route] Coding Agent (selectedAgent: ${agentExecution.selectedAgentId || "none"}, explicit: ${!!effectiveCodingAgent}, auto-detected: ${agentExecution.autoCodeQuery})`);
+      const history = await messageModel.getBySessionId(targetMessage.session_id);
+      const selectedModel = "coding_agent";
+
+      if (!CHAT_MODELS.sambanova.enabled) {
+        const assistantRecord = await messageModel.create(
+          targetMessage.session_id,
+          "assistant",
+          'Coding Agent requires SAMBANOVA_API_KEY to be configured.',
+          selectedModel
+        );
+        void assistantRecord;
+      } else {
+        try {
+          const aiReply = await runCodingAgentLoop(req.user.id, targetMessage.session_id, history, selectedModel, {
+            agentInstruction: agentExecution.agentInstruction,
+            agentLabel: agentExecution.selectedAgent?.label || "Coding Agent",
+          });
+
+          const codeExport = await offloadLargeCodeBlocksToFiles(targetMessage.session_id, normalizedContent, aiReply, 100);
+          const assistantRecord = await messageModel.create(
+            targetMessage.session_id,
+            "assistant",
+            codeExport.content,
+            selectedModel
+          );
+          for (const attachment of codeExport.attachments) {
+            await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
+          }
+          runDinoAgentLearning(req.user.id, targetMessage.session_id, normalizedContent, aiReply, {
+            sourceAgent: agentExecution.selectedAgent?.label || "Coding Agent",
+            sourceAgentId: agentExecution.selectedAgentId || "coding_agent",
+            sourceModel: selectedModel,
+            learningSource: "coding_agent_turn",
+          }).catch(console.error);
+        } catch (err) {
+          console.error("[Edit Message Route] Coding agent failed:", err?.message || err);
+          const assistantRecord = await messageModel.create(
+            targetMessage.session_id,
+            "assistant",
+            `Coding Agent encountered an error: ${err?.message || "Unknown error"}`,
+            selectedModel
+          );
+          void assistantRecord;
         }
       }
     } else {
       const history = await messageModel.getBySessionId(targetMessage.session_id);
-      const sources = deepSearch ? await deepSearchWeb(normalizedContent) : [];
+      const sources = deepSearch ? await scopedDeepSearchWeb(normalizedContent) : [];
       if (sources.length > 0) {
         try {
           await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
@@ -3510,14 +4936,9 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
         ? await getCrossChatContext(req.user.id, targetMessage.session_id)
         : "";
-      const ragContextResult = await buildRagContext(
-        req.user.id,
-        targetMessage.session_id,
-        normalizedContent,
-        deepSearch || thinking ? 8 : 6
-      );
+      const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit);
       const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
-      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, model, !!thinking);
+      let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, effectiveModel, !!thinking, !!lightning);
 
       if (sources.length > 0) {
         const links = sources.map((s) => `- [${s.title}](${s.url})`).join("\n");
@@ -3537,11 +4958,17 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         targetMessage.session_id,
         "assistant",
         codeExport.content,
-        resolvePreferredChatModel(model)
+        resolvePreferredChatModel(effectiveModel)
       );
       for (const attachment of codeExport.attachments) {
         await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
       }
+      runDinoAgentLearning(req.user.id, targetMessage.session_id, normalizedContent, aiReply, {
+        sourceAgent: agentExecution.selectedAgent?.label || "Chat Model",
+        sourceAgentId: agentExecution.selectedAgentId || null,
+        sourceModel: resolvePreferredChatModel(effectiveModel),
+        learningSource: "chat_model_turn",
+      }).catch(console.error);
     }
 
     const messages = await messageModel.getBySessionId(targetMessage.session_id);
@@ -4038,8 +5465,21 @@ initializeApp().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 Backend running at http://localhost:${PORT}`);
     console.log("Allowed origins:", ALLOWED_ORIGINS);
+    maybeWakeDinoMcpDocker();
+    void maybeWakeSerenaHttpBridge();
   });
 }).catch(err => {
   console.error("❌ Failed to start server:", err);
   process.exit(1);
 });
+
+
+
+
+
+
+
+
+
+
+

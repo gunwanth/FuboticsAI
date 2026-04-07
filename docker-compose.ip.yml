@@ -1,0 +1,153 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-fubotics}
+      POSTGRES_USER: ${PGUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-fubotics}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dino-mcp:
+    build:
+      context: ./fubotics-chat-backend
+      dockerfile: mcp-server/Dockerfile
+    command: ["node", "mcp-server/http-server.js"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      PGHOST: ${DINO_KB_PGHOST:-postgres}
+      PGPORT: ${DINO_KB_PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:-fubotics}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:-postgres}
+      PGSSL: ${PGSSL:-false}
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-llama-3.3-70b-versatile}
+      HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_ROUTER_BASE_URL: ${HF_ROUTER_BASE_URL:-https://router.huggingface.co/v1}
+      HF_CHAT_MODEL: ${HF_CHAT_MODEL:-katanemo/Arch-Router-1.5B:hf-inference}
+      DINO_SELF_LEARNING: ${DINO_SELF_LEARNING:-true}
+      DINO_ALWAYS_WEB: ${DINO_ALWAYS_WEB:-false}
+      DINO_AGENT_MODEL: ${DINO_AGENT_MODEL:-llama-3.3-70b-versatile}
+      DINO_AGENT_MAX_ITERATIONS: ${DINO_AGENT_MAX_ITERATIONS:-3}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-2048}
+      AI_DEEP_SEARCH_MAX_TOKENS: ${AI_DEEP_SEARCH_MAX_TOKENS:-3072}
+      DEEP_SEARCH_MAX_RESULTS: ${DEEP_SEARCH_MAX_RESULTS:-4}
+      DEEP_SEARCH_SNIPPET_CHARS: ${DEEP_SEARCH_SNIPPET_CHARS:-700}
+      DEEP_SEARCH_FETCH_PAGES: ${DEEP_SEARCH_FETCH_PAGES:-true}
+      DEEP_SEARCH_SEARCH_TIMEOUT_MS: ${DEEP_SEARCH_SEARCH_TIMEOUT_MS:-9000}
+      DEEP_SEARCH_PAGE_TIMEOUT_MS: ${DEEP_SEARCH_PAGE_TIMEOUT_MS:-8000}
+      MCP_SEARCH_TIMEOUT_MS: ${MCP_SEARCH_TIMEOUT_MS:-9000}
+      MCP_PAGE_TIMEOUT_MS: ${MCP_PAGE_TIMEOUT_MS:-8000}
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: 5051
+    ports:
+      - "${DINO_MCP_HTTP_PORT:-5051}:5051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5051/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./fubotics-chat-backend
+    restart: unless-stopped
+    environment:
+      PORT: 5001
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-}
+      PGHOST: ${PGHOST:-postgres}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:-fubotics}
+      PGUSER: ${PGUSER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:-postgres}
+      PGSSL: ${PGSSL:-false}
+      JWT_SECRET: ${JWT_SECRET}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS}
+      FRONTEND_PUBLIC_URL: ${FRONTEND_PUBLIC_URL}
+      BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-llama-3.3-70b-versatile}
+      HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_ROUTER_BASE_URL: ${HF_ROUTER_BASE_URL:-https://router.huggingface.co/v1}
+      HF_CHAT_MODEL: ${HF_CHAT_MODEL:-katanemo/Arch-Router-1.5B:hf-inference}
+      DINO_SELF_LEARNING: ${DINO_SELF_LEARNING:-true}
+      DINO_ALWAYS_WEB: ${DINO_ALWAYS_WEB:-false}
+      DINO_AGENT_MODEL: ${DINO_AGENT_MODEL:-llama-3.3-70b-versatile}
+      DINO_AGENT_MAX_ITERATIONS: ${DINO_AGENT_MAX_ITERATIONS:-3}
+      DINO_USE_MCP_TOOLS: true
+      DINO_MCP_HTTP_URL: ${DINO_MCP_HTTP_URL:-http://dino-mcp:5051}
+      DINO_MCP_AUTO_WAKE: false
+      DINO_MCP_TOOL_TIMEOUT_MS: ${DINO_MCP_TOOL_TIMEOUT_MS:-30000}
+      ENABLE_FREEPIK: ${ENABLE_FREEPIK:-false}
+      FREEPIK_API_KEY: ${FREEPIK_API_KEY:-}
+      FREEPIK_IMAGE_MODEL: ${FREEPIK_IMAGE_MODEL:-flux-pro-v1-1}
+      HF_IMAGE_MODEL: ${HF_IMAGE_MODEL:-black-forest-labs/FLUX.1-schnell}
+      LOCAL_IMAGE_WORKER_URL: ${LOCAL_IMAGE_WORKER_URL:-}
+      POLLINATIONS_BASE_URL: ${POLLINATIONS_BASE_URL:-}
+      DEEP_SEARCH_MAX_RESULTS: ${DEEP_SEARCH_MAX_RESULTS:-4}
+      DEEP_SEARCH_FETCH_CONCURRENCY: ${DEEP_SEARCH_FETCH_CONCURRENCY:-2}
+      DEEP_SEARCH_SNIPPET_CHARS: ${DEEP_SEARCH_SNIPPET_CHARS:-700}
+      DEEP_SEARCH_FETCH_PAGES: ${DEEP_SEARCH_FETCH_PAGES:-true}
+      DEEP_SEARCH_SEARCH_TIMEOUT_MS: ${DEEP_SEARCH_SEARCH_TIMEOUT_MS:-9000}
+      DEEP_SEARCH_PAGE_TIMEOUT_MS: ${DEEP_SEARCH_PAGE_TIMEOUT_MS:-8000}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-2048}
+      AI_DEEP_SEARCH_MAX_TOKENS: ${AI_DEEP_SEARCH_MAX_TOKENS:-3072}
+      PUBLIC_IMAGE_SHARE_EXPIRY: ${PUBLIC_IMAGE_SHARE_EXPIRY:-30d}
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_attachments:/app/attachments
+      - backend_generated:/app/generated
+    ports:
+      - "${BACKEND_PORT:-5001}:5001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dino-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./fubotics-chat-frontend
+    restart: unless-stopped
+    environment:
+      PORT: 80
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  backend_uploads:
+  backend_attachments:
+  backend_generated:

@@ -551,6 +551,27 @@ If you want this system to get significantly smarter without getting fragile:
   - encourage per-claim provenance
   - rank sources by trust level (docs > blogs > unknown)
 
+## MCP Server
+
+The repo now also includes a standalone MCP server under:
+
+- `fubotics-chat-backend/mcp-server/server.js`
+
+This server exposes Dino-oriented tools over MCP so an external agent runner can orchestrate:
+
+- `search_rag`
+- `deep_search_web`
+- `store_knowledge`
+- `token_policy_inspect`
+
+This is useful when you want a client-side or external orchestration layer to drive Dino as a self-running tool user while still writing learned knowledge back into the same PostgreSQL knowledge base.
+
+Important:
+
+- This improves agent interoperability and autonomy.
+- It does not by itself retrain the base LLM.
+- It enables long-term memory growth and tool-based autonomy through MCP.
+
 ## Troubleshooting
 
 If retrieval seems wrong:

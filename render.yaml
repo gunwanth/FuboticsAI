@@ -1,0 +1,144 @@
+databases:
+  - name: fubotics-postgres
+    databaseName: fubotics
+    user: fubotics
+    plan: starter
+    region: singapore
+
+services:
+  - type: web
+    name: fubotics-chat-frontend
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerContext: ./fubotics-chat-frontend
+    dockerfilePath: ./fubotics-chat-frontend/Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
+
+  - type: pserv
+    name: fubotics-dino-mcp
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerContext: ./fubotics-chat-backend
+    dockerfilePath: ./fubotics-chat-backend/mcp-server/Dockerfile
+    dockerCommand: node mcp-server/http-server.js
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fubotics-postgres
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: HUGGINGFACE_API_KEY
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
+      - key: HF_ROUTER_BASE_URL
+        value: https://router.huggingface.co/v1
+      - key: HF_CHAT_MODEL
+        value: katanemo/Arch-Router-1.5B:hf-inference
+      - key: DINO_SELF_LEARNING
+        value: "true"
+      - key: DINO_ALWAYS_WEB
+        value: "false"
+      - key: DINO_AGENT_MODEL
+        value: llama-3.3-70b-versatile
+      - key: DINO_AGENT_MAX_ITERATIONS
+        value: "3"
+      - key: DEEP_SEARCH_MAX_RESULTS
+        value: "4"
+      - key: DEEP_SEARCH_SNIPPET_CHARS
+        value: "700"
+      - key: DEEP_SEARCH_FETCH_PAGES
+        value: "true"
+      - key: AI_MAX_TOKENS
+        value: "2048"
+      - key: AI_DEEP_SEARCH_MAX_TOKENS
+        value: "3072"
+
+  - type: web
+    name: fubotics-chat-backend
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerContext: ./fubotics-chat-backend
+    dockerfilePath: ./fubotics-chat-backend/Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fubotics-postgres
+          property: connectionString
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_PUBLIC_URL
+        sync: false
+      - key: BACKEND_PUBLIC_URL
+        sync: false
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: HUGGINGFACE_API_KEY
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: FREEPIK_API_KEY
+        sync: false
+      - key: LOCAL_IMAGE_WORKER_URL
+        sync: false
+      - key: POLLINATIONS_BASE_URL
+        sync: false
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
+      - key: HF_ROUTER_BASE_URL
+        value: https://router.huggingface.co/v1
+      - key: HF_CHAT_MODEL
+        value: katanemo/Arch-Router-1.5B:hf-inference
+      - key: DINO_SELF_LEARNING
+        value: "true"
+      - key: DINO_ALWAYS_WEB
+        value: "false"
+      - key: DINO_AGENT_MODEL
+        value: llama-3.3-70b-versatile
+      - key: DINO_AGENT_MAX_ITERATIONS
+        value: "3"
+      - key: DINO_USE_MCP_TOOLS
+        value: "true"
+      - key: DINO_MCP_AUTO_WAKE
+        value: "false"
+      - key: DINO_MCP_HTTP_URL
+        value: http://fubotics-dino-mcp:10000
+      - key: ENABLE_FREEPIK
+        value: "false"
+      - key: DEEP_SEARCH_MAX_RESULTS
+        value: "4"
+      - key: DEEP_SEARCH_FETCH_CONCURRENCY
+        value: "2"
+      - key: DEEP_SEARCH_SNIPPET_CHARS
+        value: "700"
+      - key: DEEP_SEARCH_FETCH_PAGES
+        value: "true"
+      - key: AI_MAX_TOKENS
+        value: "2048"
+      - key: AI_DEEP_SEARCH_MAX_TOKENS
+        value: "3072"
+      - key: PUBLIC_IMAGE_SHARE_EXPIRY
+        value: 30d

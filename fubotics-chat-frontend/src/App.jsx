@@ -7,9 +7,10 @@ import "./App.css";
 // Important: keep API host aligned with the frontend host, otherwise refresh cookies can be set on
 // `localhost` while the UI is running on `127.0.0.1` (or vice versa), causing `/api/refresh` 401 loops.
 const API_BASE =
+  (typeof window !== "undefined" && window.__APP_CONFIG__?.API_BASE_URL) ||
   import.meta.env.VITE_API_BASE_URL ||
   (typeof window !== "undefined" ? `http://${window.location.hostname}:5000` : "http://localhost:5000");
-const ANONYMOUS_DEFAULT_MODEL = "hf";
+const ANONYMOUS_DEFAULT_MODEL = "sambanova";
 const LANDING_TITLES = [
   "What can I help with?",
   "How can I support you today?",
@@ -19,6 +20,13 @@ const LANDING_TITLES = [
   "How can I assist right now?",
   "What should we work on first?",
   "What can I help you figure out?",
+];
+const LANDING_QUICK_ACTIONS = [
+  { id: "light", label: "Lightning", icon: ">>" },
+  { id: "deep", label: "Deep research", icon: "◌" },
+  { id: "upload", label: "Attach file", icon: "✦" },
+  { id: "agent", label: "Dino agent", icon: "△" },
+  { id: "temp", label: "Temporary", icon: "◍" },
 ];
 const INTRO_TYPING_TEXT = "NexaCore";
 const INTRO_NOTE = "Starting secure chat, saved sessions, files, and research tools.";
@@ -31,7 +39,7 @@ let failedQueue = [];
 function broadcastLogout() {
   try {
     window.dispatchEvent(new CustomEvent("auth:logout"));
-  } catch (_) {
+  } catch {
     // ignore
   }
 }
@@ -150,15 +158,19 @@ export default function App() {
   const [filesSidebarVisible, setFilesSidebarVisible] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const chatWindowRef = useRef(null);
-  const [dataAnalytics, setDataAnalytics] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
   const [availableModels, setAvailableModels] = useState([
     { id: "groq", label: "groq", enabled: true },
     { id: "dino", label: "Dino_1.0", enabled: true },
-    { id: "hf", label: "HF_1.0.1", enabled: true },
+    { id: "sambanova", label: "SambaNova", enabled: true },
   ]);
-  const [selectedModel, setSelectedModel] = useState(localStorage.getItem("chatModel") || "groq");
+  const [availableAgents, setAvailableAgents] = useState([]);
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const stored = localStorage.getItem("chatModel") || "groq";
+    return stored === "hf" ? "sambanova" : stored;
+  });
+  const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem("selectedAgentId") || "");
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [sessionAttachments, setSessionAttachments] = useState([]);
@@ -193,6 +205,7 @@ export default function App() {
   const [sharedLimitModal, setSharedLimitModal] = useState(null); // "soft" | "hard" | null
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const copyResetTimerRef = useRef(null);
+  const lightningWarningTimerRef = useRef(null);
   const activeRequestControllerRef = useRef(null);
   const fileInputRef = useRef(null);
   const composerToolsRef = useRef(null);
@@ -203,8 +216,12 @@ export default function App() {
   const voiceSessionIdRef = useRef(0);
   const inputTextareaRef = useRef(null);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
-  const [agentModeEnabled, setAgentModeEnabled] = useState(localStorage.getItem("agentModeEnabled") === "true");
+  const [lightningEnabled, setLightningEnabled] = useState(localStorage.getItem("lightningEnabled") === "true");
+  const [showLightningWarning, setShowLightningWarning] = useState(false);
+  const [agentModeEnabled, setAgentModeEnabled] = useState(false);
+  const [codingAgentEnabled, setCodingAgentEnabled] = useState(false);
   const [processSteps, setProcessSteps] = useState([]);
   const [processStepIndex, setProcessStepIndex] = useState(0);
   const [voiceState, setVoiceState] = useState("idle");
@@ -238,16 +255,24 @@ export default function App() {
   });
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) || null;
   const showFloatingSessionMenu = token && !shareToken && !!selectedSession;
-  const showTemporaryChatToggle = token && !shareToken && !selectedSession;
   const canUseThinking = !!token;
+  const canUseAdvancedGuestLockedModes = !!token;
+  const visibleLandingQuickActions = LANDING_QUICK_ACTIONS.filter((action) => {
+    if (!canUseAdvancedGuestLockedModes && ["light", "deep"].includes(action.id)) {
+      return false;
+    }
+    return true;
+  });
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
-    : "HF_1.0.1 (Anonymous)";
+    : "SambaNova (Anonymous)";
+  const selectedAgent = availableAgents.find((agent) => agent.id === selectedAgentId) || null;
+  const selectedAgentLabel = selectedAgent?.shortLabel || selectedAgent?.label || "Agents";
   const getModelLabel = (modelId, fallback = null) => {
     const normalized = String(modelId || fallback || "").trim().toLowerCase();
     if (!normalized) return "";
     if (normalized === "generation_pipeline") return "Generation Pipeline";
-    if (normalized === "hf") return "HF_1.0.1";
+    if (normalized === "hf" || normalized === "sambanova") return "SambaNova";
     if (normalized === "dino") return "Dino_1.0";
     return availableModels.find((m) => m.id === normalized)?.label || normalized;
   };
@@ -302,7 +327,7 @@ export default function App() {
     };
     window.addEventListener("popstate", syncShareToken);
     return () => window.removeEventListener("popstate", syncShareToken);
-  }, []);
+  }, [selectedModel]);
 
   useEffect(() => {
     if (!shareToken) return;
@@ -337,6 +362,7 @@ export default function App() {
     setSharedLimitModal(null);
   }, [shareToken]);
 
+  // continueSharedChatWithCurrentAuth is intentionally not part of the trigger surface here.
   useEffect(() => {
     if (!token || !pendingContinueShared || !shareToken) return;
     const run = async () => {
@@ -345,6 +371,7 @@ export default function App() {
       setShowAuthScreen(false);
     };
     run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, pendingContinueShared, shareToken]);
 
   useEffect(() => {
@@ -364,13 +391,13 @@ export default function App() {
           setToken(refreshedToken);
           axios.defaults.headers.common["Authorization"] = `Bearer ${refreshedToken}`;
         }
-      } catch (_) {
+      } catch {
         localStorage.removeItem("accessToken");
       }
     };
 
     bootstrapAuth();
-  }, []);
+  }, [selectedModel]);
 
   useEffect(() => {
     const onLogout = () => {
@@ -400,25 +427,107 @@ export default function App() {
             localStorage.setItem("chatModel", fallback);
           }
         }
+        const agents = Array.isArray(res.data?.availableAgents)
+          ? res.data.availableAgents
+          : [];
+        if (agents.length > 0) {
+          setAvailableAgents(agents.filter((agent) => agent?.enabled !== false));
+        }
       } catch (err) {
         console.warn("Failed to load model list, using default:", err?.message || err);
       }
     };
     loadModels();
-  }, []);
+  }, [selectedModel]);
 
   useEffect(() => {
     localStorage.setItem("chatModel", selectedModel);
   }, [selectedModel]);
 
   useEffect(() => {
-    localStorage.setItem("agentModeEnabled", agentModeEnabled);
-  }, [agentModeEnabled]);
+    if (selectedAgentId) {
+      localStorage.setItem("selectedAgentId", selectedAgentId);
+    } else {
+      localStorage.removeItem("selectedAgentId");
+    }
+  }, [selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgentId) {
+      setAgentModeEnabled(false);
+      setCodingAgentEnabled(false);
+      return;
+    }
+
+    const nextAgent = availableAgents.find((agent) => agent.id === selectedAgentId);
+    if (!nextAgent) {
+      setAgentModeEnabled(false);
+      setCodingAgentEnabled(false);
+      return;
+    }
+
+    if (nextAgent.executionMode === "dino") {
+      setAgentModeEnabled(true);
+      setCodingAgentEnabled(false);
+      setSelectedModel("dino");
+      localStorage.setItem("chatModel", "dino");
+      return;
+    }
+
+    setAgentModeEnabled(true);
+    setCodingAgentEnabled(true);
+  }, [availableAgents, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    const stillAvailable = availableAgents.some((agent) => agent.id === selectedAgentId);
+    if (!stillAvailable && availableAgents.length > 0) {
+      setSelectedAgentId("");
+    }
+  }, [availableAgents, selectedAgentId]);
+
+
+  useEffect(() => {
+    localStorage.setItem("lightningEnabled", lightningEnabled);
+  }, [lightningEnabled]);
+
+
+  useEffect(() => {
+    if (lightningWarningTimerRef.current) {
+      window.clearTimeout(lightningWarningTimerRef.current);
+      lightningWarningTimerRef.current = null;
+    }
+
+    if (!lightningEnabled) {
+      setShowLightningWarning(false);
+      return undefined;
+    }
+
+    setShowLightningWarning(true);
+    lightningWarningTimerRef.current = window.setTimeout(() => {
+      setShowLightningWarning(false);
+      lightningWarningTimerRef.current = null;
+    }, 5000);
+
+    return () => {
+      if (lightningWarningTimerRef.current) {
+        window.clearTimeout(lightningWarningTimerRef.current);
+        lightningWarningTimerRef.current = null;
+      }
+    };
+  }, [lightningEnabled]);
 
   useEffect(() => {
     // Thinking mode is only available for logged-in users.
     if (!canUseThinking) setThinkingEnabled(false);
   }, [canUseThinking]);
+
+  useEffect(() => {
+    if (canUseAdvancedGuestLockedModes) return;
+    setDeepSearchEnabled(false);
+    setLightningEnabled(false);
+    setSelectedAgentId("");
+  }, [canUseAdvancedGuestLockedModes]);
 
   useEffect(() => {
     localStorage.setItem("pinnedSessionIds", JSON.stringify(pinnedSessionIds));
@@ -482,7 +591,8 @@ export default function App() {
       return ["Updating message...", "Rebuilding answer...", "Finalizing edit..."];
     }
     if (options.agentMode) {
-      return ["Initializing agent...", "Reasoning step-by-step...", "Using tools...", "Finalizing insight..."];
+      const label = options.agentLabel || "agent";
+      return [`Starting ${label}...`, "Reasoning step-by-step...", "Using tools...", "Finalizing insight..."];
     }
     if (options.deepSearch) {
       return ["Searching sources...", "Reading pages...", "Building cited answer..."];
@@ -507,6 +617,7 @@ export default function App() {
       if (!composerToolsRef.current) return;
       if (!composerToolsRef.current.contains(event.target)) {
         setComposerMenuOpen(false);
+        setAgentMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -570,7 +681,7 @@ export default function App() {
             speechRecognitionRef.current.onerror = null;
             speechRecognitionRef.current.onend = null;
             speechRecognitionRef.current.stop();
-        } catch (_) {
+        } catch {
           // Ignore cleanup errors from browser speech API.
         }
       }
@@ -636,6 +747,7 @@ export default function App() {
     };
   }, [token, messages, sessionAttachments, allUserAttachments, attachmentPreviewUrls]);
 
+  // Fetch helpers below are intentionally invoked on auth transitions only.
   useEffect(() => {
     if (token) {
       localStorage.setItem("accessToken", token);
@@ -661,8 +773,10 @@ export default function App() {
       setAllUserAttachments([]);
     }
     rotateLandingTitle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
+  // This effect depends on auth/session/sidebar state, not helper identity.
   useEffect(() => {
     if (!token || !filesSidebarVisible) return;
     fetchAllUserAttachments();
@@ -672,6 +786,7 @@ export default function App() {
         .then((res) => setSessionAttachments(res.data.attachments || []))
         .catch(() => setSessionAttachments([]));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, filesSidebarVisible, selectedSessionId]);
 
   function AuthScreen() {
@@ -685,10 +800,6 @@ export default function App() {
     const loginFailCount = loginFailureMap[loginIdentifierKey] || 0;
     const showForgotPasswordButton =
       localMode === "login" && Boolean(loginIdentifierKey) && loginFailCount >= 3;
-
-    useEffect(() => {
-      setLocalMode(authIntentMode || "login");
-    }, [authIntentMode]);
 
     async function handleLocalSubmit(e) {
       e.preventDefault();
@@ -914,17 +1025,6 @@ export default function App() {
           return;
         }
 
-        if (list.length > 0) {
-          const nextId = list[0].id;
-          setSelectedSessionId(nextId);
-          searchParams.set("session", String(nextId));
-          const next = new URL(window.location.href);
-          next.search = searchParams.toString();
-          window.history.replaceState({}, "", next.toString());
-          await fetchMessages(nextId);
-          return;
-        }
-
         setSelectedSessionId(null);
         setMessages([]);
         setSessionAttachments([]);
@@ -1072,6 +1172,69 @@ export default function App() {
 
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
+    }
+  }
+
+  function toggleTemporaryChat() {
+    if (incognitoDraftSelected) {
+      setIncognitoDraftSelected(false);
+      setIncognitoMessages([]);
+      setInput("");
+      clearAttachedFilesState();
+    } else {
+      rotateLandingTitle();
+      setSelectedSessionId(null);
+      setMessages([]);
+      setSessionAttachments([]);
+      setDeepSearchEnabled(false);
+      setThinkingEnabled(false);
+      setLightningEnabled(false);
+      setSelectedAgentId("");
+      setFilesSidebarVisible(false);
+      setIncognitoDraftSelected(true);
+      setIncognitoMessages([]);
+      clearAttachedFilesState();
+    }
+    setInput("");
+    setOpenFloatingChatMenu(false);
+    setOpenFloatingModelMenu(false);
+    setComposerMenuOpen(false);
+
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("session");
+    window.history.replaceState({}, "", nextUrl.toString());
+  }
+
+  function toggleLightningMode() {
+    if (!canUseAdvancedGuestLockedModes) return;
+    setLightningEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        setThinkingEnabled(false);
+      }
+      return next;
+    });
+  }
+
+  function handleLandingQuickAction(actionId) {
+    if (actionId === "light") {
+      if (!canUseAdvancedGuestLockedModes) return;
+      toggleLightningMode();
+      return;
+    }
+    if (actionId === "deep") {
+      if (!canUseAdvancedGuestLockedModes) return;
+      setDeepSearchEnabled((prev) => !prev);
+      return;
+    }
+    if (actionId === "upload") {
+      if (!token || incognitoDraftSelected) return;
+      fileInputRef.current?.click();
+      return;
+    }
+    if (actionId === "temp") {
+      if (!token) return;
+      toggleTemporaryChat();
     }
   }
 
@@ -1390,7 +1553,7 @@ export default function App() {
       try {
         await navigator.clipboard.writeText(value);
         return true;
-      } catch (_) {
+      } catch {
         // Fall through to prompt fallback.
       }
     }
@@ -1542,7 +1705,8 @@ export default function App() {
                   params: { sessionId: targetSessionId },
                 });
                 setSessionAttachments(attRes.data.attachments || []);
-              } catch (_) {
+              } catch {
+                // Ignore attachment refresh failure after background analysis.
               }
             }
             fetchAllUserAttachments();
@@ -1770,7 +1934,7 @@ export default function App() {
         speechRecognitionRef.current.onerror = null;
         speechRecognitionRef.current.onend = null;
         speechRecognitionRef.current.stop();
-      } catch (_) {
+      } catch {
         // Ignore browser speech API stop errors.
       }
       speechRecognitionRef.current = null;
@@ -1823,6 +1987,7 @@ export default function App() {
       deepSearch: deepSearchEnabled,
       thinking: canUseThinking && thinkingEnabled,
       agentMode: agentModeEnabled,
+      agentLabel: selectedAgent?.label || "",
       hasFiles: attachedFiles.length > 0,
     }));
     setProcessStepIndex(0);
@@ -1844,7 +2009,10 @@ export default function App() {
           content: text,
           deepSearch: deepSearchEnabled,
           thinking: canUseThinking && thinkingEnabled,
+          lightning: lightningEnabled,
           agentMode: agentModeEnabled,
+          codingAgent: codingAgentEnabled,
+          selectedAgentId: selectedAgentId || undefined,
           rewriteThread: true,
           model: activeModel,
         }, { signal: requestController.signal });
@@ -1956,6 +2124,8 @@ export default function App() {
           content: text,
           history: historyForApi,
           thinking: canUseThinking && thinkingEnabled,
+          lightning: lightningEnabled,
+          selectedAgentId: selectedAgentId || undefined,
           model: activeModel,
         }, { signal: requestController.signal });
         const assistant = String(res.data?.assistant || "").trim() || "No reply";
@@ -1971,7 +2141,10 @@ export default function App() {
         content: text,
         deepSearch: deepSearchEnabled,
         thinking: canUseThinking && thinkingEnabled,
+        lightning: lightningEnabled,
         agentMode: agentModeEnabled,
+        codingAgent: codingAgentEnabled,
+        selectedAgentId: selectedAgentId || undefined,
         model: activeModel,
         attachmentIds: attachmentIdsToSend.length > 0 ? attachmentIdsToSend : undefined,
       }, { signal: requestController.signal });
@@ -2144,25 +2317,6 @@ export default function App() {
     setOpenFloatingChatMenu(false);
   }
 
-  async function handleDownload(filename) {
-    try {
-      const response = await axios.get(`${API_BASE}/api/download/${filename}`, {
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', filename);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Download error:', error);
-      alert('Failed to download file');
-    }
-  }
-
   async function handleDownloadAttachment(attachmentId, filename) {
     try {
       const response = await axios.get(`${API_BASE}/api/download-attachment/${attachmentId}`, {
@@ -2239,8 +2393,8 @@ export default function App() {
     if (/\bpublic\s+class\b|\bsystem\.out\.println\b/.test(lower)) return "java";
     if (/\bconsole\.log\b|\bfunction\s+\w+\(|\bconst\s+\w+\s*=/.test(lower)) return "js";
     if (/\bselect\b[\s\S]*\bfrom\b/.test(lower)) return "sql";
-    if (/^\s*\{[\s\S]*\}\s*$/m && /"\w+"\s*:/.test(text)) return "json";
-    if (/^\s*[-\w]+\s*:\s*.+$/m && !/[{};]/.test(text)) return "yml";
+    if (/^\s*\{[\s\S]*\}\s*$/m.test(text) && /"\w+"\s*:/.test(text)) return "json";
+    if (/^\s*[-\w]+\s*:\s*.+$/m.test(text) && !/[{};]/.test(text)) return "yml";
     if (/#include\s*<|int\s+main\s*\(/.test(text)) return "cpp";
     if (/\bpackage\s+main\b|\bfunc\s+\w+\(/.test(lower)) return "go";
     if (/\bfn\s+\w+\(|\blet\s+mut\b/.test(lower)) return "rs";
@@ -2283,8 +2437,7 @@ export default function App() {
     window.history.replaceState({}, "", nextUrl.toString());
     fetchMessages(sessionId);
     clearAttachedFilesState();
-    setDataAnalytics(null);
-    
+
     if (window.innerWidth <= 768) {
       setSidebarVisible(false);
     }
@@ -2654,7 +2807,7 @@ export default function App() {
     <div className="app">
       <div className="layout">
 
-        <aside className={`sidebar ${sidebarVisible ? 'visible' : 'hidden'}`}>
+        <aside className={`sidebar ${isLandingMode ? 'landing-mode' : ''} ${sidebarVisible ? 'visible' : 'hidden'}`}>
           <div className="sidebar-header">
             <div className="brand">
               <div className="brand-icon" aria-hidden="true">
@@ -2953,7 +3106,7 @@ export default function App() {
         {!token && showAuthScreen && (
           <div className="auth-modal-overlay" onClick={() => { setShowAuthScreen(false); setPendingContinueShared(false); }}>
             <div className="auth-modal-content" onClick={(e) => e.stopPropagation()}>
-              <AuthScreen />
+              <AuthScreen key={authIntentMode} />
             </div>
           </div>
         )}
@@ -3061,9 +3214,45 @@ export default function App() {
               </div>
             </div>
             <div className="floating-controls-right">
+              {isLandingMode && (
+                <>
+                  {canUseAdvancedGuestLockedModes && (
+                    <button
+                      className={`deep-search-btn landing-top-btn ${deepSearchEnabled ? "active" : ""}`}
+                      disabled={incognitoDraftSelected}
+                      onClick={() => {
+                        setDeepSearchEnabled((prev) => !prev);
+                      }}
+                      title={deepSearchEnabled ? "Disable deep search" : "Enable deep search"}
+                    >
+                      Deep Search
+                    </button>
+                  )}
+                  <button
+                    className="files-toggle-btn landing-top-btn"
+                    disabled={incognitoDraftSelected}
+                    onClick={() => setFilesSidebarVisible((prev) => !prev)}
+                    title={filesSidebarVisible ? "Hide files" : "Show files"}
+                  >
+                    Files
+                  </button>
+                </>
+              )}
               <button className="floating-pill floating-new-chat-btn" onClick={handleNewChat} title="New chat" aria-label="New chat">
                 +
               </button>
+              {token && !shareToken && (
+                <button
+                  className={`floating-pill floating-temporary-chat-btn ${incognitoDraftSelected ? "active" : ""}`}
+                  onClick={toggleTemporaryChat}
+                  title={incognitoDraftSelected ? "Temporary chat is active" : "Start a temporary unsaved chat"}
+                  aria-label={incognitoDraftSelected ? "Temporary chat active" : "Temporary chat"}
+                >
+                  <span className="temporary-chat-icon" aria-hidden="true">
+                    {incognitoDraftSelected && <span className="temporary-chat-check">✓</span>}
+                  </span>
+                </button>
+              )}
               {showFloatingSessionMenu && (
                 <div className="floating-chat-menu-wrap">
                   <button
@@ -3089,35 +3278,30 @@ export default function App() {
                   </button>
                 </div>
               )}
-              {showTemporaryChatToggle && (
-                <button
-                  className={`floating-pill floating-incognito-draft ${incognitoDraftSelected ? "active" : ""}`}
-                  title={incognitoDraftSelected ? "Temporary chat is active" : "Start a temporary unsaved chat"}
-                  onClick={() => {
-                    if (incognitoDraftSelected) {
-                      setIncognitoDraftSelected(false);
-                      setIncognitoMessages([]);
-                      setInput("");
-                      clearAttachedFilesState();
-                    } else {
-                      setIncognitoDraftSelected(true);
-                      setIncognitoMessages([]);
-                    }
-                    setInput("");
-                    setOpenFloatingChatMenu(false);
-                    setOpenFloatingModelMenu(false);
-                  }}
-                >
-                  {incognitoDraftSelected ? "Temporary Chat On" : "Temporary Chat"}
-                </button>
-              )}
             </div>
           </div>
 
           <div className="chat-column">
             <div className="chat-window" ref={chatWindowRef}>
-              {isLandingMode && (
-                <div className="hero-title">{landingTitle}</div>
+              {isLandingMode && incognitoDraftSelected && token && !shareToken && (
+                <div className="temporary-chat-hero">
+                  <div className="temporary-chat-hero-title">Temporary Chat</div>
+                  <div className="temporary-chat-hero-note">
+                    This chat won&apos;t appear in your chat history, and won&apos;t be used to train our models.
+                  </div>
+                </div>
+              )}
+              {isLandingMode && !(incognitoDraftSelected && token && !shareToken) && (
+                <div className="landing-hero">
+                  <div className="landing-hero-beam" aria-hidden="true" />
+                  <div className="landing-hero-mark" aria-hidden="true">
+                    <img src={nexacoreLogo} alt="" className="landing-hero-logo-image" />
+                  </div>
+                  <div className="hero-title">{landingTitle}</div>
+                  <div className="landing-hero-subtitle">
+                    Ask, research, build, and explore with a focused workspace.
+                  </div>
+                </div>
               )}
               {shareToken && sharedView.loading && (
                 <div className="empty-state"><div className="empty-state-content"><p>Loading shared chat...</p></div></div>
@@ -3133,7 +3317,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "hf")}
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3156,7 +3340,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "hf")}
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3170,7 +3354,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "hf")}
+                      {renderSender(msg, "sambanova")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3286,14 +3470,7 @@ export default function App() {
                     Thinking On <span className="composer-active-close">x</span>
                   </button>
                 )}
-                <button
-                  className={`composer-active-pill agent-status-pill ${agentModeEnabled ? "active" : "inactive"}`}
-                  onClick={() => setAgentModeEnabled(!agentModeEnabled)}
-                  title={`Turn Agent Mode ${agentModeEnabled ? "OFF" : "ON"}`}
-                >
-                  Dino_1.0: {agentModeEnabled ? "ON" : "OFF"}
-                </button>
-                {deepSearchEnabled && (
+                {canUseAdvancedGuestLockedModes && deepSearchEnabled && (
                   <button className="composer-active-pill" onClick={() => setDeepSearchEnabled(false)}>
                     Deep research On <span className="composer-active-close">x</span>
                   </button>
@@ -3309,6 +3486,11 @@ export default function App() {
                   </button>
                 )}
               </div>
+              {showLightningWarning && (
+                <div className="composer-mode-warning">
+                  Lightning is enabled. Faster answers may reduce detail.
+                </div>
+              )}
               {editingMessageId && (
                 <div className="edit-banner">
                   Editing previous message
@@ -3404,9 +3586,56 @@ export default function App() {
                     accept=".csv,.txt,.json,.pdf,.png,.jpg,.jpeg,.xls,.xlsx,.docx,.pptx,image/*"
                     disabled={uploading}
                   />
+                  {token && availableAgents.length > 0 && (
+                    <div className="agent-selector-wrap">
+                      <button
+                        className={`agent-selector-btn ${selectedAgentId ? "active" : ""}`}
+                        onClick={() => {
+                          setComposerMenuOpen(false);
+                          setAgentMenuOpen((prev) => !prev);
+                        }}
+                        type="button"
+                        title={selectedAgent ? selectedAgent.label : "Choose an agent"}
+                      >
+                        <span className="agent-selector-label">{selectedAgentLabel}</span>
+                        <span className="agent-selector-chevron" aria-hidden="true">v</span>
+                      </button>
+                      {agentMenuOpen && (
+                        <div className="agent-selector-menu" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            className={!selectedAgentId ? "active" : ""}
+                            onClick={() => {
+                              setSelectedAgentId("");
+                              setAgentMenuOpen(false);
+                            }}
+                            type="button"
+                          >
+                            No agent
+                          </button>
+                          {availableAgents.map((agent) => (
+                            <button
+                              key={agent.id}
+                              className={selectedAgentId === agent.id ? "active" : ""}
+                              onClick={() => {
+                                setSelectedAgentId(agent.id);
+                                setAgentMenuOpen(false);
+                              }}
+                              type="button"
+                              title={agent.description || agent.label}
+                            >
+                              {agent.shortLabel || agent.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <button
                     className="attach-btn"
-                    onClick={() => setComposerMenuOpen((prev) => !prev)}
+                    onClick={() => {
+                      setAgentMenuOpen(false);
+                      setComposerMenuOpen((prev) => !prev);
+                    }}
                     disabled={uploading}
                     title="Open quick actions"
                   >
@@ -3431,30 +3660,24 @@ export default function App() {
                         Take screenshot
                       </button>
                       <div className="composer-menu-divider" />
-                      <button
-                        className={agentModeEnabled ? "active" : ""}
-                        onClick={() => {
-                          setAgentModeEnabled((prev) => {
-                            const next = !prev;
-                            if (next) {
-                              setThinkingEnabled(false);
-                              setDeepSearchEnabled(false);
-                            }
-                            return next;
-                          });
-                          setComposerMenuOpen(false);
-                        }}
-                      >
-                        {agentModeEnabled ? "Dino_1.0 (Agent Mode) On" : "Enable Agent Mode (Dino_1.0)"}
-                      </button>
+                      {canUseAdvancedGuestLockedModes && (
+                        <button
+                          className={lightningEnabled ? "active" : ""}
+                          onClick={() => {
+                            toggleLightningMode();
+                            setComposerMenuOpen(false);
+                          }}
+                        >
+                          {lightningEnabled ? "Lightning On" : "Lightning"}
+                        </button>
+                      )}
                       <button
                         className={thinkingEnabled ? "active" : ""}
                         onClick={() => {
                           setThinkingEnabled((prev) => {
                             const next = !prev;
                             if (next) {
-                              setDeepSearchEnabled(false);
-                              setAgentModeEnabled(false);
+                              setLightningEnabled(false);
                             }
                             return next;
                           });
@@ -3464,23 +3687,17 @@ export default function App() {
                       >
                         {thinkingEnabled ? "Thinking On" : "Thinking"}
                       </button>
-                      <button
-                        className={deepSearchEnabled ? "active" : ""}
-                        onClick={() => {
-                          setDeepSearchEnabled((prev) => {
-                            const next = !prev;
-                            if (next) {
-                              setThinkingEnabled(false);
-                              setAgentModeEnabled(false);
-                            }
-                            return next;
-                          });
-                          setComposerMenuOpen(false);
-                        }}
-                        disabled={!token}
-                      >
-                        {deepSearchEnabled ? "Deep research On" : "Deep research"}
-                      </button>
+                      {canUseAdvancedGuestLockedModes && (
+                        <button
+                          className={deepSearchEnabled ? "active" : ""}
+                          onClick={() => {
+                            setDeepSearchEnabled((prev) => !prev);
+                            setComposerMenuOpen(false);
+                          }}
+                        >
+                          {deepSearchEnabled ? "Deep research On" : "Deep research"}
+                        </button>
+                      )}
                       <div className="composer-model-label">Model: {activeModelLabel}</div>
                     </div>
                   )}
@@ -3523,25 +3740,72 @@ export default function App() {
                 </button>
 
                 <div className="composer-footer">
-                  <button
-                    className={`agent-toggle-btn-ext ${agentModeEnabled ? "active" : ""}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setAgentModeEnabled((prev) => {
-                        const next = !prev;
-                        if (next) {
-                          setThinkingEnabled(false);
-                          setDeepSearchEnabled(false);
-                        }
-                        return next;
-                      });
-                    }}
-                    title={agentModeEnabled ? "Dino_1.0 Agent On" : "Dino_1.0 Agent Off"}
-                  >
-                    <span className="agent-toggle-icon">🦕</span>
-                  </button>
+                  {canUseAdvancedGuestLockedModes && (
+                    <button
+                      className={`lightning-toggle-mini ${lightningEnabled ? "active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLightningMode();
+                      }}
+                      title={lightningEnabled ? "Lightning mode on" : "Lightning mode off"}
+                      aria-label={lightningEnabled ? "Disable lightning mode" : "Enable lightning mode"}
+                    >
+                      <span className="lightning-toggle-mini-icon" aria-hidden="true">{"\u26A1"}</span>
+                    </button>
+                  )}
+                  {token && availableAgents.some((agent) => agent.id === "dino_agent") && (
+                    <button
+                      className={`agent-toggle-btn-ext ${selectedAgentId === "dino_agent" ? "active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedAgentId((prev) => (prev === "dino_agent" ? "" : "dino_agent"));
+                      }}
+                      title={selectedAgentId === "dino_agent" ? "Dino Agent selected" : "Select Dino Agent"}
+                      aria-label={selectedAgentId === "dino_agent" ? "Deselect Dino Agent" : "Select Dino Agent"}
+                    >
+                      <img src={nexacoreLogo} alt="" className="agent-toggle-icon-image" aria-hidden="true" />
+                    </button>
+                  )}
+                  {canUseAdvancedGuestLockedModes && availableAgents.some((agent) => agent.id === "coding_agent") && (
+                    <button
+                      className={`agent-toggle-btn-ext ${selectedAgentId === "coding_agent" ? "active" : ""}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedAgentId((prev) => (prev === "coding_agent" ? "" : "coding_agent"));
+                      }}
+                      title={selectedAgentId === "coding_agent" ? "Coding Agent selected" : "Select Coding Agent"}
+                      aria-label={selectedAgentId === "coding_agent" ? "Deselect Coding Agent" : "Select Coding Agent"}
+                    >
+                      <span className="agent-toggle-icon" aria-hidden="true">&lt;/&gt;</span>
+                    </button>
+                  )}
                 </div>
               </div>
+              {isLandingMode && (
+                <div className="landing-quick-actions">
+                  {visibleLandingQuickActions.map((action) => (
+                    <button
+                      key={action.id}
+                      type="button"
+                      className={`landing-quick-chip ${
+                        (action.id === "light" && lightningEnabled) ||
+                        (action.id === "deep" && deepSearchEnabled) ||
+                                                (action.id === "temp" && incognitoDraftSelected)
+                          ? "active"
+                          : ""
+                      }`}
+                      onClick={() => handleLandingQuickAction(action.id)}
+                      disabled={
+                        (action.id === "upload" && (!token || incognitoDraftSelected)) ||
+                        (incognitoDraftSelected && action.id !== "temp")
+                      }
+                    >
+                      <span className="landing-quick-chip-icon" aria-hidden="true">{action.icon}</span>
+                      <span>{action.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -3797,3 +4061,4 @@ export default function App() {
     </div>
   );
 }
+

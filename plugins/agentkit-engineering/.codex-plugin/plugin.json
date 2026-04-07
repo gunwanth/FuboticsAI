@@ -1,0 +1,32 @@
+﻿{
+  "name": "agentkit-engineering",
+  "version": "1.0.0",
+  "description": "Engineering roles from the local AgentKit setup, packaged for Codex plugin discovery.",
+  "author": {
+    "name": "Fubotics",
+    "email": "[TODO: contact-email]",
+    "url": "[TODO: project-url]"
+  },
+  "homepage": "[TODO: plugin-homepage]",
+  "repository": "[TODO: plugin-repository]",
+  "license": "MIT",
+  "keywords": ["agentkit", "engineering", "backend", "frontend", "devops"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AgentKit Engineering",
+    "shortDescription": "Engineering roles from the project's AgentKit prompts.",
+    "longDescription": "Adds the local AgentKit engineering roles as Codex-discoverable plugin skills so backend, frontend, devops, prototyping, and test-fix guidance are packaged consistently.",
+    "developerName": "Fubotics",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "[TODO: website-url]",
+    "privacyPolicyURL": "[TODO: privacy-policy-url]",
+    "termsOfServiceURL": "[TODO: terms-of-service-url]",
+    "defaultPrompt": [
+      "Use the backend-architect role to review this API design.",
+      "Use the frontend-developer role to refine this React UI.",
+      "Use the devops-automator role to improve this Docker deployment."
+    ],
+    "brandColor": "#E8604A"
+  }
+}

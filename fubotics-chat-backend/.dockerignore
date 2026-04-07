@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+uploads
+attachments
+generated
+image_worker
+backend_stdout.log
+backend_stderr.log
+mcp-server/mcp_stdout.log
+mcp-server/mcp_stderr.log

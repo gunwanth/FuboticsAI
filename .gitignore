@@ -1,0 +1,31 @@
+# Root ignore rules for safe GitHub pushes
+node_modules/
+.uv-cache/
+
+# Local secrets and env files
+.env
+.env.*
+!.env.production.example
+!.env*.example
+fubotics-chat-backend/.env
+fubotics-chat-backend/.env.*
+!fubotics-chat-backend/.env.example
+!fubotics-chat-backend/.env*.example
+
+# Local editor / assistant state
+.vscode/
+.claude/
+.serena/
+
+# Runtime artifacts
+fubotics-chat-backend/attachments/
+fubotics-chat-backend/generated/
+fubotics-chat-backend/uploads/
+
+# OS / misc
+Thumbs.db
+.DS_Store
+*.log
+
+# Accidental local files
+fubotics-chat-backend/config/database.js files.
