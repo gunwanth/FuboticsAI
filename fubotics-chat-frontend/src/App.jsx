@@ -9,7 +9,7 @@ import "./App.css";
 const API_BASE =
   (typeof window !== "undefined" && window.__APP_CONFIG__?.API_BASE_URL) ||
   import.meta.env.VITE_API_BASE_URL ||
-  (typeof window !== "undefined" ? `http://${window.location.hostname}:5000` : "http://localhost:5000");
+  (typeof window !== "undefined" ? `http://${window.location.hostname}:5001` : "http://localhost:5001");
 const ANONYMOUS_DEFAULT_MODEL = "sambanova";
 const LANDING_TITLES = [
   "What can I help with?",
@@ -31,6 +31,100 @@ const LANDING_QUICK_ACTIONS = [
 const INTRO_TYPING_TEXT = "NexaCore";
 const INTRO_NOTE = "Starting secure chat, saved sessions, files, and research tools.";
 axios.defaults.withCredentials = true;
+
+function buildAxiosTrace(error, extra = {}) {
+  const config = error?.config || {};
+  const response = error?.response || null;
+  const request = error?.request || null;
+  return {
+    message: error?.message || String(error),
+    code: error?.code || null,
+    method: String(config.method || "get").toUpperCase(),
+    url: config.url || null,
+    baseURL: config.baseURL || null,
+    withCredentials: !!config.withCredentials,
+    status: response?.status || null,
+    statusText: response?.statusText || null,
+    responseData: response?.data || null,
+    requestReadyState: request?.readyState,
+    requestStatus: request?.status,
+    requestResponseURL: request?.responseURL || null,
+    isNetworkError: error?.code === "ERR_NETWORK" || /Network Error/i.test(String(error?.message || "")),
+    isTimeout: error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT",
+    ...extra,
+  };
+}
+
+function logAxiosException(label, error, extra = {}) {
+  try {
+    console.error(label, buildAxiosTrace(error, extra));
+  } catch (loggingError) {
+    console.error(label, error, loggingError);
+  }
+}
+
+async function requestRefreshToken(context = "refresh") {
+  const refreshUrl = API_BASE + "/api/refresh";
+  const response = await axios.post(refreshUrl, {}, {
+    withCredentials: true,
+    skipAuth: true,
+    validateStatus: () => true,
+  });
+
+  if (response.status >= 200 && response.status < 300 && response.data?.accessToken) {
+    return {
+      ok: true,
+      accessToken: response.data.accessToken,
+      response,
+    };
+  }
+
+  if (response.status === 401) {
+    console.warn("[Auth Refresh Miss]", {
+      context,
+      status: response.status,
+      data: response.data || null,
+      url: refreshUrl,
+    });
+    return {
+      ok: false,
+      unauthenticated: true,
+      response,
+    };
+  }
+
+  const error = new Error(`Refresh failed with status ${response.status}`);
+  error.response = response;
+  error.config = response.config || { url: refreshUrl, method: "post", withCredentials: true };
+  error.code = "ERR_REFRESH_FAILED";
+  throw error;
+}
+
+if (typeof window !== "undefined" && !window.__NEXACORE_PROMISE_TRACE__) {
+  window.__NEXACORE_PROMISE_TRACE__ = true;
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event?.reason;
+    if (reason?.isAxiosError) {
+      const status = reason?.response?.status || null;
+      const isHandledAuthRejection = status === 401;
+      if (isHandledAuthRejection) {
+        event.preventDefault();
+        console.warn("[Handled Axios Auth Rejection]", buildAxiosTrace(reason, {
+          source: "window.unhandledrejection",
+          handled: true,
+        }));
+        return;
+      }
+      logAxiosException("[Unhandled Axios Rejection]", reason, { source: "window.unhandledrejection" });
+      event.preventDefault();
+      return;
+    }
+    console.error("[Unhandled Promise Rejection]", {
+      source: "window.unhandledrejection",
+      reason,
+    });
+  });
+}
 
 // Axios interceptor setup for token refresh
 let isRefreshing = false;
@@ -75,7 +169,10 @@ axios.interceptors.request.use(
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    logAxiosException("[Axios Request Error]", error, { source: "request-interceptor" });
+    return Promise.reject(error);
+  }
 );
 
 axios.interceptors.response.use(
@@ -92,24 +189,35 @@ axios.interceptors.response.use(
             originalRequest.headers.Authorization = `Bearer ${token}`;
             return axios(originalRequest);
           })
-          .catch(err => Promise.reject(err));
+          .catch(err => {
+            logAxiosException("[Axios Refresh Queue Error]", err, { source: "refresh-queue", retryUrl: originalRequest?.url || null });
+            return Promise.reject(err);
+          });
       }
 
       originalRequest._retry = true;
       isRefreshing = true;
 
       try {
-        const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true });
-        const { accessToken } = response.data;
-        
+        const refreshResult = await requestRefreshToken("response-interceptor");
+        if (!refreshResult.ok || !refreshResult.accessToken) {
+          processQueue(refreshResult.response || new Error("Refresh unavailable"), null);
+          localStorage.removeItem("accessToken");
+          delete axios.defaults.headers.common["Authorization"];
+          broadcastLogout();
+          return Promise.reject(refreshResult.response || new Error("Refresh unavailable"));
+        }
+        const accessToken = refreshResult.accessToken;
+
         localStorage.setItem("accessToken", accessToken);
         axios.defaults.headers.common["Authorization"] = `Bearer ${accessToken}`;
-        
+
         processQueue(null, accessToken);
         originalRequest.headers.Authorization = `Bearer ${accessToken}`;
-        
+
         return axios(originalRequest);
       } catch (refreshError) {
+        logAxiosException("[Axios Refresh Error]", refreshError, { source: "refresh-attempt", retryUrl: originalRequest?.url || null });
         processQueue(refreshError, null);
         // If refresh fails, logout user
         localStorage.removeItem("accessToken");
@@ -384,14 +492,16 @@ export default function App() {
       }
 
       try {
-        const response = await axios.post(`${API_BASE}/api/refresh`, {}, { withCredentials: true });
-        const refreshedToken = response.data?.accessToken;
-        if (refreshedToken) {
-          localStorage.setItem("accessToken", refreshedToken);
-          setToken(refreshedToken);
-          axios.defaults.headers.common["Authorization"] = `Bearer ${refreshedToken}`;
+        const refreshResult = await requestRefreshToken("bootstrap-auth");
+        if (refreshResult.ok && refreshResult.accessToken) {
+          localStorage.setItem("accessToken", refreshResult.accessToken);
+          setToken(refreshResult.accessToken);
+          axios.defaults.headers.common["Authorization"] = `Bearer ${refreshResult.accessToken}`;
+          return;
         }
-      } catch {
+        localStorage.removeItem("accessToken");
+      } catch (err) {
+        logAxiosException("[Bootstrap Refresh Error]", err, { source: "bootstrap-auth" });
         localStorage.removeItem("accessToken");
       }
     };

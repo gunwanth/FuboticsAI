@@ -68,8 +68,29 @@ const defaultOrigins = [
   "https://fuboticsai.onrender.com"
 ];
 
+const defaultAllowedOriginHosts = [
+  "instagram.com",
+  "telegram.org",
+  "t.me",
+  "facebook.com",
+  "meta.com",
+  "messenger.com",
+  "snapchat.com",
+  "web.snapchat.com",
+  "tiktok.com",
+  "x.com",
+  "twitter.com",
+  "linkedin.com",
+  "whatsapp.com",
+  "web.whatsapp.com",
+];
+
 const envList = process.env.FRONTEND_ORIGINS
   ? process.env.FRONTEND_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
+  : [];
+
+const envAllowedOriginHosts = process.env.ALLOWED_ORIGIN_HOSTS
+  ? process.env.ALLOWED_ORIGIN_HOSTS.split(",").map(s => s.trim()).filter(Boolean)
   : [];
 
 function normalizeOrigin(value) {
@@ -78,8 +99,26 @@ function normalizeOrigin(value) {
   return raw.replace(/\/+$/, "");
 }
 
+function normalizeHostname(value) {
+  return String(value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+}
+
+function getOriginHostname(origin) {
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) return "";
+  try {
+    return normalizeHostname(new URL(normalizedOrigin).hostname);
+  } catch (_) {
+    return "";
+  }
+}
+
 const ALLOWED_ORIGINS = Array.from(
   new Set([...envList, ...defaultOrigins].map(normalizeOrigin).filter(Boolean))
+);
+
+const ALLOWED_ORIGIN_HOSTS = Array.from(
+  new Set([...envAllowedOriginHosts, ...defaultAllowedOriginHosts].map(normalizeHostname).filter(Boolean))
 );
 
 const isDevCors =
@@ -90,6 +129,10 @@ function isAllowedOrigin(origin) {
   if (!origin) return true;
   const normalizedOrigin = normalizeOrigin(origin);
   if (ALLOWED_ORIGINS.includes(normalizedOrigin)) return true;
+  const hostname = getOriginHostname(normalizedOrigin);
+  if (hostname && ALLOWED_ORIGIN_HOSTS.some((allowedHost) => hostname === allowedHost || hostname.endsWith(`.${allowedHost}`))) {
+    return true;
+  }
   if (!isDevCors) return false;
   // Allow local dev ports (Vite may bump 5173 -> 5174, etc.).
   return /^http:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0):\d+$/i.test(normalizedOrigin);
@@ -952,12 +995,6 @@ async function deepSearchWeb(query, maxResults = deepSearchMaxResults) {
     "www.quora.com",
     "pinterest.com",
     "www.pinterest.com",
-    "facebook.com",
-    "www.facebook.com",
-    "instagram.com",
-    "www.instagram.com",
-    "tiktok.com",
-    "www.tiktok.com",
   ]);
   const normalizeResultUrl = (rawUrl) => {
     if (!rawUrl) return null;

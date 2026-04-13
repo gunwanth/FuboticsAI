@@ -29,3 +29,6 @@ Thumbs.db
 
 # Accidental local files
 fubotics-chat-backend/config/database.js files.
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat

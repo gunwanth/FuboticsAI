@@ -253,12 +253,6 @@ async function deepSearchWeb(query, maxResults = 5) {
     "www.quora.com",
     "pinterest.com",
     "www.pinterest.com",
-    "facebook.com",
-    "www.facebook.com",
-    "instagram.com",
-    "www.instagram.com",
-    "tiktok.com",
-    "www.tiktok.com",
   ]);
 
   const fetchBingRssResults = async () => {
