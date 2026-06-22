@@ -2,17 +2,19 @@ import base64
 import io
 import os
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file  # type: ignore[import]
 
 try:
-    import torch
-    from diffusers import DiffusionPipeline
-except Exception as exc:  # pragma: no cover
+    import torch  # type: ignore[import]
+except ImportError:
     torch = None
+
+try:
+    from diffusers import DiffusionPipeline  # type: ignore[import]
+except ImportError:
     DiffusionPipeline = None
-    IMPORT_ERROR = str(exc)
-else:
-    IMPORT_ERROR = None
+
+IMPORT_ERROR = None
 
 
 MODEL_ID = os.getenv("LOCAL_IMAGE_MODEL_ID", "aiyouthalliance/Free-Image-Generation")

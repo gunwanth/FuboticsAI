@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
   content TEXT NOT NULL,
   token_count INTEGER NOT NULL DEFAULT 0,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  embedding DOUBLE PRECISION[],
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (source_id, chunk_index)
 );

@@ -7,7 +7,51 @@ const { executeCodeToolWithFallback } = require("./serenaConnector");
 const SAMBANOVA_API_KEY = process.env.SAMBANOVA_API_KEY || null;
 const SAMBANOVA_BASE_URL = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
 const SAMBANOVA_CHAT_MODEL = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || null;
+const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
+const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "deepseek-v4";
+
+// Dedicated key and model for coding generation
+const CODING_NVIDIA_API_KEY = process.env.CODING_NVIDIA_API_KEY || process.env.NVIDIA_API_KEY || null;
+const CODING_CHAT_MODEL = process.env.CODING_CHAT_MODEL || "Z-ai/glm-5.1";
+
 const CODING_AGENT_MAX_ITERS = Math.max(1, Math.min(10, Number.parseInt(process.env.CODING_AGENT_MAX_ITERATIONS || "3", 10)));
+
+/**
+ * Helper to send chat completions to NVIDIA API with structured tools
+ */
+async function sendNVIDIACompletion(messages, tools = null, toolChoice = "auto") {
+  if (!CODING_NVIDIA_API_KEY) {
+    throw new Error("Coding Agent requires a valid NVIDIA API Key.");
+  }
+
+  const payload = {
+    model: CODING_CHAT_MODEL,
+    messages,
+    temperature: 0.5,
+    max_tokens: 4096,
+  };
+
+  if (tools) {
+    payload.tools = tools;
+    payload.tool_choice = toolChoice;
+  }
+
+  let response;
+  try {
+    response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
+      headers: {
+        Authorization: `Bearer ${CODING_NVIDIA_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 60000,
+    });
+  } catch (err) {
+    throw new Error(`NVIDIA completion failed: ${extractProviderError(err)}`);
+  }
+
+  return response.data.choices[0].message;
+}
 
 function extractProviderError(err) {
   const status = err?.response?.status;
@@ -314,16 +358,16 @@ Be professional, precise, and focused on code quality. IMPORTANT: Keep responses
 
       let assistantMessage;
       try {
-        assistantMessage = await sendSambaNovaCompletion(conversationHistory, CODING_AGENT_TOOLS, "auto");
+        assistantMessage = await sendNVIDIACompletion(conversationHistory, CODING_AGENT_TOOLS, "auto");
       } catch (err) {
         const message = String(err?.message || "");
-        console.error("[Coding Agent] SambaNova API call failed:", message);
+        console.error("[Coding Agent] NVIDIA API call failed:", message);
 
         // Some provider/model combinations reject tool-enabled payloads with 400s.
         // Retry once without tools so the user still gets a coding answer.
         if (message.includes("HTTP 400")) {
           console.warn("[Coding Agent] Retrying without tools after provider rejected tool request.");
-          assistantMessage = await sendSambaNovaCompletion(conversationHistory, null, "auto");
+          assistantMessage = await sendNVIDIACompletion(conversationHistory, null, "auto");
         } else {
           throw err;
         }
@@ -364,7 +408,7 @@ Be professional, precise, and focused on code quality. IMPORTANT: Keep responses
             const toolResult = await executeCodeToolWithFallback(name, args, { requestedByAgent: agentLabel });
             result = toolResult.display;
           } else if (name === "search_rag") {
-            const ragResult = await buildRagContext(userId, sessionId, args.query, args.limit || 6);
+            const ragResult = await buildRagContext(userId, sessionId, args.query, args.limit || 6, 0.15);
             result = (ragResult.context || "No relevant code patterns found in knowledge base.").slice(0, 1000);
           } else if (name === "store_code_knowledge") {
             const source = await knowledgeSourceModel.createInsight(

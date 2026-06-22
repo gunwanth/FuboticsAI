@@ -51,6 +51,25 @@ async function initializeDatabase() {
     // Quick connectivity check first, gives clearer startup errors in hosted envs.
     await pool.query("SELECT 1");
 
+    const vectorExtensionCheck = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM pg_available_extensions
+         WHERE name = 'vector'
+       ) AS available,
+       EXISTS (
+         SELECT 1
+         FROM pg_extension
+         WHERE extname = 'vector'
+       ) AS installed`
+    );
+    const vectorExtension = vectorExtensionCheck.rows[0] || {};
+    if (!vectorExtension.available || !vectorExtension.installed) {
+      console.warn(
+        'pgvector extension is not installed; continuing with text-only RAG schema.'
+      );
+    }
+
     const schemaPath = path.join(__dirname, "..", "database", "schema.sql");
     const schemaSQL = fs.readFileSync(schemaPath, "utf8");
 

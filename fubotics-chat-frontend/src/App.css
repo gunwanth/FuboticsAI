@@ -9,7 +9,7 @@
 /* ─── Design Tokens ─────────────────────────────────────────────── */
 :root {
   /* Backgrounds */
-  --bg:         #03030a;
+  --bg:         #000000;
   --bg-mid:     #060610;
   --surface:    #0a0a14;
   --surface-2:  #0f0f1c;
@@ -200,12 +200,24 @@ body::after {
   pointer-events: none;
   z-index: 0;
   opacity: 0.22;
-  animation: beamBreath 7s ease-in-out infinite;
 }
 
-@keyframes beamBreath {
-  0%, 100% { opacity: 1; transform: translateX(-50%) scaleX(1); }
-  50%      { opacity: 0.6; transform: translateX(-50%) scaleX(0.7); }
+.startup-woven-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+  z-index: 1;
+}
+
+.startup-woven-screen .woven-hero {
+  width: 100vw;
+  min-height: 100vh;
+  margin: 0;
 }
 
 /* ─── Startup Splash ────────────────────────────────────────────── */

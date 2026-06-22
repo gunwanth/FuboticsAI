@@ -5,6 +5,60 @@ const knowledgeChunkModel = require("../models/knowledgeChunk");
 
 const SAMBANOVA_API_KEY = process.env.SAMBANOVA_API_KEY || null;
 const SAMBANOVA_BASE_URL = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || null;
+const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
+const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "deepseek-v4";
+
+/**
+ * Helper to extract provider error message
+ */
+function extractProviderError(err) {
+  const status = err?.response?.status;
+  const providerMessage =
+    err?.response?.data?.error?.message ||
+    err?.response?.data?.message ||
+    err?.response?.data?.error ||
+    err?.message ||
+    "Unknown provider error";
+
+  return status ? `HTTP ${status}: ${providerMessage}` : String(providerMessage);
+}
+
+/**
+ * Helper to send chat completions to NVIDIA API with structured tools
+ */
+async function sendNVIDIACompletion(messages, tools = null, toolChoice = "auto") {
+  if (!NVIDIA_API_KEY) {
+    throw new Error("Dino 1.0 Agent requires a valid NVIDIA API Key.");
+  }
+
+  const payload = {
+    model: NVIDIA_CHAT_MODEL,
+    messages,
+    temperature: 0.5,
+    max_tokens: 4096,
+  };
+
+  if (tools) {
+    payload.tools = tools;
+    payload.tool_choice = toolChoice;
+  }
+
+  let response;
+  try {
+    response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
+      headers: {
+        Authorization: `Bearer ${NVIDIA_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 60000,
+    });
+  } catch (err) {
+    throw new Error(`NVIDIA completion failed: ${extractProviderError(err)}`);
+  }
+
+  return response.data.choices[0].message;
+}
 
 /**
  * Helper to send chat completions to the Web-based LLM API (SambaNova)
@@ -141,10 +195,30 @@ Identity: You are Dino 1.0. You represent the cutting edge of Web-Integrated AI.
       iterations++;
       console.log(`[Agent Loop] Iteration ${iterations}...`);
 
-      const assistantMessage = await sendWebCompletion(conversationHistory, AGENT_TOOLS, "auto").catch(err => {
-        console.error("[Agent Loop] Web LLM API call failed:", err.message);
-        throw err;
-      });
+      let assistantMessage;
+      try {
+        // Use NVIDIA completion for NVIDIA models, otherwise use SambaNova
+        if (model && model.toLowerCase().includes("deepseek") || model && model.toLowerCase().includes("nvidia")) {
+          assistantMessage = await sendNVIDIACompletion(conversationHistory, AGENT_TOOLS, "auto");
+        } else {
+          assistantMessage = await sendWebCompletion(conversationHistory, AGENT_TOOLS, "auto");
+        }
+      } catch (err) {
+        console.error("[Agent Loop] LLM API call failed:", err.message);
+
+        // Some provider/model combinations reject tool-enabled payloads with 400s.
+        // Retry once without tools so the user still gets an answer.
+        if (String(err?.message || "").includes("HTTP 400")) {
+          console.warn("[Agent Loop] Retrying without tools after provider rejected tool request.");
+          if (model && model.toLowerCase().includes("deepseek") || model && model.toLowerCase().includes("nvidia")) {
+            assistantMessage = await sendNVIDIACompletion(conversationHistory, null, "auto");
+          } else {
+            assistantMessage = await sendWebCompletion(conversationHistory, null, "auto");
+          }
+        } else {
+          throw err;
+        }
+      }
       conversationHistory.push(assistantMessage);
 
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
@@ -174,7 +248,7 @@ Identity: You are Dino 1.0. You represent the cutting edge of Web-Integrated AI.
 
         try {
           if (name === "search_rag") {
-            const ragResult = await buildRagContext(userId, sessionId, args.query, 8);
+            const ragResult = await buildRagContext(userId, sessionId, args.query, 8, 0.15, 0.2);
             result = ragResult.context || "No relevant information found in the knowledge base.";
           } else if (name === "deep_search_web") {
             const sources = await deepSearchWebFn(args.query);
@@ -274,7 +348,9 @@ Reason step-by-step and then use the tool if needed.`;
   }
 }
 
+
 module.exports = {
   runAgentLoop,
   runAgentLearning,
+  filterLowConfidenceChunks,
 };

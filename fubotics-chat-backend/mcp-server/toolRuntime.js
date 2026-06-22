@@ -381,7 +381,7 @@ async function searchRag(args) {
   if (!Number.isInteger(userId)) throw new Error("userId is required");
   if (!query) throw new Error("query is required");
 
-  return await buildRagContext(userId, Number.isInteger(sessionId) ? sessionId : null, query, limit);
+  return await buildRagContext(userId, Number.isInteger(sessionId) ? sessionId : null, query, limit, 0.15);
 }
 
 async function searchWeb(args) {

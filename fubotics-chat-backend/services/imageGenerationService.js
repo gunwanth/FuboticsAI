@@ -9,6 +9,9 @@ function createImageGenerationService({
   sambaNovaApiKey,
   sambaNovaBaseUrl,
   sambaNovaPromptModel,
+  nvidiaApiKey,
+  nvidiaBaseUrl,
+  nvidiaImageModel,
   freepikApiKey,
   freepikImageModel,
   freepikPollAttempts,
@@ -22,15 +25,15 @@ function createImageGenerationService({
   localImageWorkerTimeoutMs,
   allowPlaceholderFallback,
 }) {
-  async function buildImagePromptWithSamba(userPrompt) {
-    if (!sambaNovaApiKey) {
+  async function buildImagePromptWithNVIDIA(userPrompt) {
+    if (!nvidiaApiKey) {
       return userPrompt;
     }
     try {
       const resp = await axios.post(
-        `${sambaNovaBaseUrl}/chat/completions`,
+        `${nvidiaBaseUrl}/chat/completions`,
         {
-          model: sambaNovaPromptModel,
+          model: nvidiaImageModel, // Using Qwen image model for prompt enhancement
           temperature: 0.4,
           max_tokens: 500,
           messages: [
@@ -46,7 +49,7 @@ function createImageGenerationService({
         },
         {
           headers: {
-            Authorization: `Bearer ${sambaNovaApiKey}`,
+            Authorization: `Bearer ${nvidiaApiKey}`,
             "Content-Type": "application/json",
           },
           timeout: 60000,
@@ -54,7 +57,7 @@ function createImageGenerationService({
       );
       return resp.data?.choices?.[0]?.message?.content?.trim() || userPrompt;
     } catch (err) {
-      console.error("SambaNova prompt generation failed, using raw prompt:", err.message);
+      console.error("NVIDIA prompt generation failed, using raw prompt:", err.message);
       return userPrompt;
     }
   }
@@ -188,7 +191,7 @@ function createImageGenerationService({
     let imageBuffer = null;
     let imageMime = "image/png";
     let providerUsed = null;
-    const promptForGenerator = await buildImagePromptWithSamba(prompt);
+    const promptForGenerator = await buildImagePromptWithNVIDIA(prompt);
 
     if (!imageBuffer && localImageWorkerUrl) {
       try {
@@ -315,7 +318,7 @@ function createImageGenerationService({
   }
 
   return {
-    buildImagePromptWithSamba,
+    buildImagePromptWithNVIDIA,
     generateImageFile,
   };
 }

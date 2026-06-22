@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import html2canvas from "html2canvas";
 import nexacoreLogo from "./assets/nexacore-logo.svg";
+import { WovenLightHero } from "./components/ui/woven-light-hero";
 import "./App.css";
 
 // Important: keep API host aligned with the frontend host, otherwise refresh cookies can be set on
@@ -11,16 +12,6 @@ const API_BASE =
   import.meta.env.VITE_API_BASE_URL ||
   (typeof window !== "undefined" ? `http://${window.location.hostname}:5001` : "http://localhost:5001");
 const ANONYMOUS_DEFAULT_MODEL = "sambanova";
-const LANDING_TITLES = [
-  "What can I help with?",
-  "How can I support you today?",
-  "What would you like to explore?",
-  "What are we building today?",
-  "What do you want to solve next?",
-  "How can I assist right now?",
-  "What should we work on first?",
-  "What can I help you figure out?",
-];
 const LANDING_QUICK_ACTIONS = [
   { id: "light", label: "Lightning", icon: ">>" },
   { id: "deep", label: "Deep research", icon: "◌" },
@@ -28,8 +19,6 @@ const LANDING_QUICK_ACTIONS = [
   { id: "agent", label: "Dino agent", icon: "△" },
   { id: "temp", label: "Temporary", icon: "◍" },
 ];
-const INTRO_TYPING_TEXT = "NexaCore";
-const INTRO_NOTE = "Starting secure chat, saved sessions, files, and research tools.";
 axios.defaults.withCredentials = true;
 
 function buildAxiosTrace(error, extra = {}) {
@@ -343,9 +332,7 @@ export default function App() {
       return [];
     }
   });
-  const [landingTitle, setLandingTitle] = useState(LANDING_TITLES[0]);
   const [showStartupIntro, setShowStartupIntro] = useState(true);
-  const [typedIntroText, setTypedIntroText] = useState("");
   const getSessionLabel = (session) => {
     if (session?.name) return session.name;
     if (Number.isInteger(session?.session_number)) return `Session ${session.session_number}`;
@@ -416,18 +403,6 @@ export default function App() {
       : sendButtonState === "resend"
         ? "↺"
         : "↗";
-  const rotateLandingTitle = () => {
-    setLandingTitle((prev) => {
-      if (LANDING_TITLES.length <= 1) return prev;
-      const currentIndex = LANDING_TITLES.indexOf(prev);
-      let nextIndex = currentIndex;
-      while (nextIndex === currentIndex) {
-        nextIndex = Math.floor(Math.random() * LANDING_TITLES.length);
-      }
-      return LANDING_TITLES[nextIndex];
-    });
-  };
-
   useEffect(() => {
     const syncShareToken = () => {
       const p = new URLSearchParams(window.location.search).get("share");
@@ -675,25 +650,14 @@ export default function App() {
   }, [isTyping, processSteps]);
 
   useEffect(() => {
-    if (!showStartupIntro) return;
-    let charIndex = 0;
-    const typeTimer = window.setInterval(() => {
-      charIndex += 1;
-      setTypedIntroText(INTRO_TYPING_TEXT.slice(0, charIndex));
-      if (charIndex >= INTRO_TYPING_TEXT.length) {
-        window.clearInterval(typeTimer);
-      }
-    }, 150);
-
-    const dismissTimer = window.setTimeout(() => {
+    const introTimer = window.setTimeout(() => {
       setShowStartupIntro(false);
-    }, 3600);
+    }, 8000);
 
     return () => {
-      window.clearInterval(typeTimer);
-      window.clearTimeout(dismissTimer);
+      window.clearTimeout(introTimer);
     };
-  }, [showStartupIntro]);
+  }, []);
 
   function inferProcessSteps(text, options = {}) {
     const prompt = String(text || "").toLowerCase();
@@ -882,7 +846,6 @@ export default function App() {
       setSessionAttachments([]);
       setAllUserAttachments([]);
     }
-    rotateLandingTitle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -1262,7 +1225,6 @@ export default function App() {
   }
 
   async function handleNewChat() {
-    rotateLandingTitle();
     setSelectedSessionId(null);
     setMessages([]);
     clearAttachedFilesState();
@@ -1292,7 +1254,6 @@ export default function App() {
       setInput("");
       clearAttachedFilesState();
     } else {
-      rotateLandingTitle();
       setSelectedSessionId(null);
       setMessages([]);
       setSessionAttachments([]);
@@ -2897,18 +2858,11 @@ export default function App() {
 
   if (showStartupIntro) {
     return (
-      <div className="startup-splash">
-        <div className="startup-intro" aria-hidden={!showStartupIntro}>
-          <div className="startup-intro-chip">
-            <span className="startup-intro-dot" />
-            Initializing
-          </div>
-          <div className="startup-intro-title">
-            {typedIntroText}
-            <span className="startup-intro-caret" />
-          </div>
-          <div className="startup-intro-note">{INTRO_NOTE}</div>
-        </div>
+      <div className="startup-woven-screen">
+        <WovenLightHero
+          headline="NexaCore"
+          subtitle="Ask, research, build, and explore in one focused workspace."
+        />
       </div>
     );
   }
@@ -3398,18 +3352,6 @@ export default function App() {
                   <div className="temporary-chat-hero-title">Temporary Chat</div>
                   <div className="temporary-chat-hero-note">
                     This chat won&apos;t appear in your chat history, and won&apos;t be used to train our models.
-                  </div>
-                </div>
-              )}
-              {isLandingMode && !(incognitoDraftSelected && token && !shareToken) && (
-                <div className="landing-hero">
-                  <div className="landing-hero-beam" aria-hidden="true" />
-                  <div className="landing-hero-mark" aria-hidden="true">
-                    <img src={nexacoreLogo} alt="" className="landing-hero-logo-image" />
-                  </div>
-                  <div className="hero-title">{landingTitle}</div>
-                  <div className="landing-hero-subtitle">
-                    Ask, research, build, and explore with a focused workspace.
                   </div>
                 </div>
               )}

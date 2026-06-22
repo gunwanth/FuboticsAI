@@ -1,0 +1,123 @@
+.woven-hero {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.06), transparent 42%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.88), #000 72%);
+  isolation: isolate;
+}
+
+.woven-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 20%, rgba(255, 255, 255, 0.16), transparent 28%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.04), transparent 60%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.woven-hero-aurora {
+  position: absolute;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.woven-hero-aurora-left {
+  width: min(42vw, 520px);
+  height: min(42vw, 520px);
+  left: -8vw;
+  top: 10vh;
+  background: radial-gradient(circle, rgba(106, 167, 255, 0.2) 0%, rgba(106, 167, 255, 0) 72%);
+}
+
+.woven-hero-aurora-right {
+  width: min(38vw, 460px);
+  height: min(38vw, 460px);
+  right: -6vw;
+  bottom: 8vh;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 72%);
+}
+
+.woven-hero-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.woven-hero-copy {
+  position: relative;
+  z-index: 2;
+  width: min(980px, calc(100vw - 3rem));
+  padding: clamp(2rem, 4vw, 4rem);
+  text-align: center;
+}
+
+.woven-hero-kicker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+  font-family: "Inter", sans-serif;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.woven-hero-title {
+  margin: 0;
+  color: #fff;
+  font-family: "Playfair Display", serif;
+  font-size: clamp(2.6rem, 6.2vw, 5.9rem);
+  font-weight: 700;
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  text-shadow: 0 0 50px rgba(255, 255, 255, 0.22);
+  perspective: 1000px;
+}
+
+.woven-hero-word {
+  display: inline-block;
+}
+
+.woven-hero-subtitle {
+  max-width: 38rem;
+  margin: 1.25rem auto 0;
+  color: rgba(226, 232, 240, 0.82);
+  font-family: "Inter", sans-serif;
+  font-size: clamp(0.95rem, 1.8vw, 1.08rem);
+  line-height: 1.75;
+}
+
+.woven-hero-line {
+  width: min(220px, 42vw);
+  height: 1px;
+  margin: 1.5rem auto 0;
+  transform-origin: center;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
+  box-shadow: 0 0 18px rgba(255, 255, 255, 0.18);
+}
+
+@media (max-width: 768px) {
+  .woven-hero {
+    min-height: 100vh;
+  }
+
+  .woven-hero-copy {
+    padding: 1.8rem 1.2rem;
+  }
+}

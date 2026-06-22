@@ -537,6 +537,9 @@ const imageGenerationService = createImageGenerationService({
   sambaNovaApiKey,
   sambaNovaBaseUrl,
   sambaNovaPromptModel,
+  nvidiaApiKey: process.env.NVIDIA_API_KEY,
+  nvidiaBaseUrl: process.env.NVIDIA_BASE_URL,
+  nvidiaImageModel: process.env.NVIDIA_IMAGE_MODEL,
   freepikApiKey,
   freepikImageModel,
   freepikPollAttempts,
@@ -1250,8 +1253,35 @@ function getCodeExtension(language) {
     bash: "sh",
     shell: "sh",
     sh: "sh",
+    powershell: "ps1",
+    ps1: "ps1",
+    dockerfile: "dockerfile",
+    docker: "dockerfile",
+    makefile: "makefile",
+    markdown: "md",
+    md: "md",
+    perl: "pl",
+    pl: "pl",
+    scala: "scala",
+    haskell: "hs",
+    hs: "hs",
+    lua: "lua",
+    r: "r",
+    dart: "dart",
+    toml: "toml",
+    ini: "ini",
+    xml: "xml",
+    latex: "tex",
+    tex: "tex",
+    assembly: "asm",
+    asm: "asm",
   };
-  return map[lang] || "txt";
+  if (map[lang]) return map[lang];
+  // If the language name itself is a short valid extension string, use it directly
+  if (lang.length > 0 && lang.length <= 6 && /^[a-z0-9+#_]+$/.test(lang)) {
+    return lang;
+  }
+  return "txt";
 }
 
 async function offloadLargeCodeBlocksToFiles(sessionId, prompt, replyText, minLines = 100) {
@@ -1265,7 +1295,13 @@ async function offloadLargeCodeBlocksToFiles(sessionId, prompt, replyText, minLi
     const code = String(match[3] || "");
     return sum + code.split(/\r?\n/).length;
   }, 0);
-  const exportAllCodeBlocks = totalCodeLines > minLines;
+
+  const userRequest = String(prompt || "").toLowerCase();
+  const hasFileIntent = 
+    /\b(file|download|save|export|attachment|downloadable)\b/i.test(userRequest) ||
+    /((generate|create|make|write|prepare)\s+.*\b(code|script|program|snippet|addon|module|extension|document|html|css|js|ts|py|cpp|java|sql|sh|bash|json|yml|yaml|php|go|rust|rb|cs)\b)/i.test(userRequest);
+
+  const exportAllCodeBlocks = totalCodeLines > minLines || hasFileIntent;
 
   const attachments = [];
   const segments = [];
@@ -2647,7 +2683,7 @@ async function getLocalDinoMcpClient() {
 
 async function executeDinoToolLocally(name, args, userId, sessionId, deepSearchWebFn) {
   if (name === "search_rag") {
-    const ragResult = await buildRagContext(userId, sessionId, String(args.query || ""), 8);
+    const ragResult = await buildRagContext(userId, sessionId, String(args.query || ""), 8, 0.15, 0.2);
     return {
       display: ragResult.context || "No relevant information found in the knowledge base.",
       raw: ragResult,
@@ -3077,21 +3113,27 @@ Rules:
     conversationHistory[0] = systemMessage;
   }
 
-  try {
-    const ragResult = await buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit);
-    if (ragResult?.context) {
-      conversationHistory.splice(1, 0, {
-        role: "system",
-        content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`,
-      });
-    }
-  } catch (err) {
-    console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
-  }
+  const prefetchPromises = [];
+
+  prefetchPromises.push(
+    buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit, 0.15, 0.2)
+      .then((ragResult) => {
+        if (ragResult?.context) {
+          return {
+            content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`
+          };
+        }
+        return null;
+      })
+      .catch((err) => {
+        console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
+        return null;
+      })
+  );
 
   if (isCodeAgentQuery(userQuery)) {
-    try {
-      const codePrefetch = await executeDinoTool(
+    prefetchPromises.push(
+      executeDinoTool(
         "search_codebase",
         {
           query: String(userQuery || "").slice(0, 240),
@@ -3100,21 +3142,25 @@ Rules:
         userId,
         sessionId,
         deepSearchWebFn
-      );
-      if (codePrefetch?.display) {
-        conversationHistory.splice(1, 0, {
-          role: "system",
-          content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nUse code tools if you need deeper inspection.`,
-        });
-      }
-    } catch (err) {
-      console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
-    }
+      )
+        .then((codePrefetch) => {
+          if (codePrefetch?.display) {
+            return {
+              content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nUse code tools if you need deeper inspection.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
+          return null;
+        })
+    );
   }
 
   if (isProjectCheckQuery(userQuery)) {
-    try {
-      const checkPrefetch = await executeDinoTool(
+    prefetchPromises.push(
+      executeDinoTool(
         "run_project_checks",
         {
           scope: "quick",
@@ -3123,41 +3169,67 @@ Rules:
         userId,
         sessionId,
         deepSearchWebFn
-      );
-      if (checkPrefetch?.display) {
-        conversationHistory.splice(1, 0, {
-          role: "system",
-          content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`,
-        });
-      }
-    } catch (err) {
-      console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
-    }
+      )
+        .then((checkPrefetch) => {
+          if (checkPrefetch?.display) {
+            return {
+              content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
+          return null;
+        })
+    );
   }
 
   if (proactiveWebGrounding) {
-    const preSources = await deepSearchWebFn(String(userQuery || "").trim());
-    if (preSources && preSources.length > 0) {
-      try {
-        await indexWebSourcesForRag(userId, sessionId, preSources);
-      } catch (err) {
-        console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+    prefetchPromises.push(
+      deepSearchWebFn(String(userQuery || "").trim())
+        .then(async (preSources) => {
+          if (preSources && preSources.length > 0) {
+            try {
+              await indexWebSourcesForRag(userId, sessionId, preSources);
+            } catch (err) {
+              console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+            }
+            const sourceLines = preSources
+              .slice(0, answerProfile.sourceSliceLimit)
+              .map(
+                (s) =>
+                  `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
+                    .replace(/\\s+/g, " ")
+                    .trim()
+                    .slice(0, deepSearchSnippetChars)}`
+              )
+              .join("\n");
+            return {
+              content: `Web sources pre-fetched for grounding:\n${sourceLines}\n\nPrefer these; you can call deep_search_web for more.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Prefetch web grounding failed:", err?.message || err);
+          return null;
+        })
+    );
+  }
+
+  try {
+    const prefetchResults = await Promise.all(prefetchPromises);
+    for (const res of prefetchResults) {
+      if (res?.content) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: res.content,
+        });
       }
-      const sourceLines = preSources
-        .slice(0, answerProfile.sourceSliceLimit)
-        .map(
-          (s) =>
-            `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
-              .replace(/\\s+/g, " ")
-              .trim()
-              .slice(0, deepSearchSnippetChars)}`
-        )
-        .join("\n");
-      conversationHistory.splice(1, 0, {
-        role: "system",
-        content: `Web sources pre-fetched for grounding:\n${sourceLines}\n\nPrefer these; you can call deep_search_web for more.`,
-      });
     }
+  } catch (err) {
+    console.error("[Dino] Prefetch execution failed:", err?.message || err);
   }
 
   conversationHistory.push({ role: "user", content: String(userQuery || "").slice(0, 12000) });
@@ -3270,21 +3342,27 @@ Rules:
     conversationHistory.unshift(systemMessage);
   }
 
-  try {
-    const ragResult = await buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit);
-    if (ragResult?.context) {
-      conversationHistory.splice(1, 0, {
-        role: "system",
-        content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`,
-      });
-    }
-  } catch (err) {
-    console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
-  }
+  const prefetchPromises = [];
+
+  prefetchPromises.push(
+    buildRagContext(userId, sessionId, String(userQuery || ""), answerProfile.ragLimit, 0.15, 0.2)
+      .then((ragResult) => {
+        if (ragResult?.context) {
+          return {
+            content: `Relevant knowledge base context:\n${compactDinoEvidence(ragResult.context, 2400)}`
+          };
+        }
+        return null;
+      })
+      .catch((err) => {
+        console.warn("[Dino] Initial RAG context fetch failed:", err?.message || err);
+        return null;
+      })
+  );
 
   if (isCodeAgentQuery(userQuery)) {
-    try {
-      const codePrefetch = await executeDinoTool(
+    prefetchPromises.push(
+      executeDinoTool(
         "search_codebase",
         {
           query: String(userQuery || "").slice(0, 240),
@@ -3293,21 +3371,25 @@ Rules:
         userId,
         sessionId,
         deepSearchWebFn
-      );
-      if (codePrefetch?.display) {
-        conversationHistory.splice(1, 0, {
-          role: "system",
-          content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nPrefer code tools for repository questions; use web only when freshness matters.`,
-        });
-      }
-    } catch (err) {
-      console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
-    }
+      )
+        .then((codePrefetch) => {
+          if (codePrefetch?.display) {
+            return {
+              content: `Relevant codebase matches:\n${compactDinoEvidence(codePrefetch.display, 2200)}\n\nPrefer code tools for repository questions; use web only when freshness matters.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Initial codebase prefetch failed:", err?.message || err);
+          return null;
+        })
+    );
   }
 
   if (isProjectCheckQuery(userQuery)) {
-    try {
-      const checkPrefetch = await executeDinoTool(
+    prefetchPromises.push(
+      executeDinoTool(
         "run_project_checks",
         {
           scope: "quick",
@@ -3316,41 +3398,67 @@ Rules:
         userId,
         sessionId,
         deepSearchWebFn
-      );
-      if (checkPrefetch?.display) {
-        conversationHistory.splice(1, 0, {
-          role: "system",
-          content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`,
-        });
-      }
-    } catch (err) {
-      console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
-    }
+      )
+        .then((checkPrefetch) => {
+          if (checkPrefetch?.display) {
+            return {
+              content: `Recent project check results:\n${compactDinoEvidence(checkPrefetch.display, 2200)}\n\nUse these failures to guide bug analysis or fix recommendations.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Initial project check prefetch failed:", err?.message || err);
+          return null;
+        })
+    );
   }
 
   if (proactiveWebGrounding) {
-    const preSources = await deepSearchWebFn(String(userQuery || "").trim());
-    if (preSources && preSources.length > 0) {
-      try {
-        await indexWebSourcesForRag(userId, sessionId, preSources);
-      } catch (err) {
-        console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+    prefetchPromises.push(
+      deepSearchWebFn(String(userQuery || "").trim())
+        .then(async (preSources) => {
+          if (preSources && preSources.length > 0) {
+            try {
+              await indexWebSourcesForRag(userId, sessionId, preSources);
+            } catch (err) {
+              console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+            }
+            const sourceLines = preSources
+              .slice(0, answerProfile.sourceSliceLimit)
+              .map(
+                (s) =>
+                  `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
+                    .replace(/\\s+/g, " ")
+                    .trim()
+                    .slice(0, deepSearchSnippetChars)}`
+              )
+              .join("\n");
+            return {
+              content: `Web sources pre-fetched for grounding:\n${compactDinoEvidence(sourceLines, 1800)}\n\nPrefer citing these or using deep_search_web for more.`
+            };
+          }
+          return null;
+        })
+        .catch((err) => {
+          console.warn("[Dino] Prefetch web grounding failed:", err?.message || err);
+          return null;
+        })
+    );
+  }
+
+  try {
+    const prefetchResults = await Promise.all(prefetchPromises);
+    for (const res of prefetchResults) {
+      if (res?.content) {
+        conversationHistory.splice(1, 0, {
+          role: "system",
+          content: res.content,
+        });
       }
-      const sourceLines = preSources
-        .slice(0, answerProfile.sourceSliceLimit)
-        .map(
-          (s) =>
-            `- ${s.title} (${s.url})\n  Snippet: ${String(s.snippet || "")
-              .replace(/\\s+/g, " ")
-              .trim()
-              .slice(0, deepSearchSnippetChars)}`
-        )
-        .join("\n");
-      conversationHistory.splice(1, 0, {
-        role: "system",
-        content: `Web sources pre-fetched for grounding:\n${compactDinoEvidence(sourceLines, 1800)}\n\nPrefer citing these or using deep_search_web for more.`,
-      });
     }
+  } catch (err) {
+    console.error("[Dino] Prefetch execution failed:", err?.message || err);
   }
 
   conversationHistory.push({
@@ -3843,7 +3951,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         const crossChatContext = shouldReviewAcrossChats(content)
           ? await getCrossChatContext(req.user.id, parsedSessionId)
           : "";
-        const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6);
+        const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6, 0.15, 0.2);
         const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
 
         // Build the exact same prompt as getAIReply() would, but stream the completion.
@@ -3861,6 +3969,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
               } catch (e) {
                 systemContent += `\n  ${att.analysis_result}`;
               }
+
             }
           }
           systemContent += "\n\nWhen users ask about these files, reference the information provided above.";
@@ -4046,7 +4155,9 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
       req.user.id,
       parsedSessionId,
       content,
-      deepSearch || thinking ? 8 : 6
+      deepSearch || thinking ? 8 : 6,
+      0.15,
+      0.2
     );
     const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
 
@@ -4344,7 +4455,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
           const crossChatContext = shouldReviewAcrossChats(content)
             ? await getCrossChatContext(req.user.id, parsedSessionId)
             : "";
-          const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, answerProfile.ragLimit);
+          const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, answerProfile.ragLimit, 0.15, 0.2);
           const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
           aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false, !!lightning);
         } else {
@@ -4398,11 +4509,11 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
       const history = await messageModel.getBySessionId(parsedSessionId);
       const selectedModel = "coding_agent";
 
-      if (!CHAT_MODELS.sambanova.enabled) {
+      if (!process.env.NVIDIA_API_KEY || process.env.CODING_AGENT_ENABLED !== 'true') {
         const assistantRecord = await messageModel.create(
           parsedSessionId,
           "assistant",
-          'Coding Agent requires SAMBANOVA_API_KEY to be configured.',
+          'Coding Agent requires NVIDIA_API_KEY to be configured and CODING_AGENT_ENABLED set to true.',
           selectedModel
         );
         void assistantRecord;
@@ -4864,7 +4975,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
           const crossChatContext = shouldReviewAcrossChats(normalizedContent)
             ? await getCrossChatContext(req.user.id, targetMessage.session_id)
             : "";
-          const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit);
+          const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit, 0.15, 0.2);
           const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
           aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, "dino", false, !!lightning);
         } else {
@@ -4918,11 +5029,11 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const history = await messageModel.getBySessionId(targetMessage.session_id);
       const selectedModel = "coding_agent";
 
-      if (!CHAT_MODELS.sambanova.enabled) {
+      if (!process.env.NVIDIA_API_KEY || process.env.CODING_AGENT_ENABLED !== 'true') {
         const assistantRecord = await messageModel.create(
           targetMessage.session_id,
           "assistant",
-          'Coding Agent requires SAMBANOVA_API_KEY to be configured.',
+          'Coding Agent requires NVIDIA_API_KEY to be configured and CODING_AGENT_ENABLED set to true.',
           selectedModel
         );
         void assistantRecord;
@@ -4973,7 +5084,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
         ? await getCrossChatContext(req.user.id, targetMessage.session_id)
         : "";
-      const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit);
+      const ragContextResult = await buildRagContext(req.user.id, targetMessage.session_id, normalizedContent, answerProfile.ragLimit, 0.15, 0.2);
       const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
       let aiReply = await getAIReply(history, sessionAttachments, sources, combinedContext, effectiveModel, !!thinking, !!lightning);
 
