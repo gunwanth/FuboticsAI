@@ -288,3 +288,157 @@ FROM users u
 LEFT JOIN chat_sessions cs ON u.id = cs.user_id
 LEFT JOIN messages m ON cs.id = m.session_id
 GROUP BY u.id, u.username;
+
+-- ============================================================================
+-- Semantic State Network
+-- Dynamic cognitive-state layer: unified graph nodes, edges, per-agent
+-- meta-bridge state, and traversal history for the self-improvement loop.
+-- All traversal is bounded (node/hop/char caps); this is intentionally NOT a
+-- full knowledge graph that gets walked wholesale.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS state_nodes (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  kind VARCHAR(30) NOT NULL,
+  label VARCHAR(255) NOT NULL,
+  content TEXT,
+  node_key VARCHAR(500) NOT NULL,
+  embedding DOUBLE PRECISION[],
+  source_ref TEXT,
+  source_type VARCHAR(50),
+  provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+  salience DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+  quality DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, node_key)
+);
+
+CREATE TABLE IF NOT EXISTS state_edges (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source_node_id INTEGER NOT NULL REFERENCES state_nodes(id) ON DELETE CASCADE,
+  target_node_id INTEGER NOT NULL REFERENCES state_nodes(id) ON DELETE CASCADE,
+  relation VARCHAR(30) NOT NULL,
+  weight DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+  evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+  traversal_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, source_node_id, target_node_id, relation)
+);
+
+CREATE TABLE IF NOT EXISTS agent_state (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  agent_id VARCHAR(100) NOT NULL,
+  capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+  current_context TEXT,
+  reasoning_space JSONB NOT NULL DEFAULT '[]'::jsonb,
+  meta_bridge TEXT,
+  meta_embedding DOUBLE PRECISION[],
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_active_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, session_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS state_traversals (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  agent_id VARCHAR(100),
+  query TEXT,
+  goal TEXT,
+  nodes_visited INTEGER[] NOT NULL DEFAULT '{}',
+  edges_traversed INTEGER[] NOT NULL DEFAULT '{}',
+  retrieved_nodes INTEGER[] NOT NULL DEFAULT '{}',
+  decision TEXT,
+  outcome VARCHAR(20) NOT NULL DEFAULT 'partial',
+  evidence_used BOOLEAN NOT NULL DEFAULT FALSE,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_state_nodes_user_kind ON state_nodes(user_id, kind);
+CREATE INDEX IF NOT EXISTS idx_state_nodes_user_session ON state_nodes(user_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_state_nodes_kind ON state_nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_state_nodes_last_seen ON state_nodes(last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_state_nodes_fts ON state_nodes
+  USING GIN (to_tsvector('simple', coalesce(label, '') || ' ' || coalesce(content, '')));
+CREATE INDEX IF NOT EXISTS idx_state_edges_user_source ON state_edges(user_id, source_node_id);
+CREATE INDEX IF NOT EXISTS idx_state_edges_user_target ON state_edges(user_id, target_node_id);
+CREATE INDEX IF NOT EXISTS idx_state_edges_relation ON state_edges(relation);
+CREATE INDEX IF NOT EXISTS idx_agent_state_user_session ON agent_state(user_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_state_agent_id ON agent_state(agent_id);
+CREATE INDEX IF NOT EXISTS idx_state_traversals_user_session ON state_traversals(user_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_state_traversals_created_at ON state_traversals(created_at DESC);
+
+-- ============================================================================
+-- Persistent User Profiles & Context Preferences
+-- Stores durable user profile, bio, custom system instructions, and preferences
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  display_name VARCHAR(100),
+  about_user TEXT,
+  global_instructions TEXT,
+  preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'update_user_profiles_updated_at'
+      AND tgrelid = 'user_profiles'::regclass
+  ) THEN
+    CREATE TRIGGER update_user_profiles_updated_at
+      BEFORE UPDATE ON user_profiles
+      FOR EACH ROW
+      EXECUTE FUNCTION update_updated_at_column();
+  END IF;
+END $$;
+
+-- ============================================================================
+-- Semantic State Keyframes (Fast-Path Latency Reduction)
+-- Stores pre-baked cognitive state snapshots to bypass multi-hop BFS and redundant
+-- external embedding calls on consecutive turns.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS state_keyframes (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  agent_id VARCHAR(100) NOT NULL,
+  turn_anchor INTEGER NOT NULL DEFAULT 1,
+  state_hash VARCHAR(64) NOT NULL,
+  composite_embedding DOUBLE PRECISION[] NOT NULL DEFAULT '{}',
+  drift_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.25,
+  prebaked_prompt_block TEXT NOT NULL DEFAULT '',
+  active_node_ids INTEGER[] NOT NULL DEFAULT '{}',
+  active_concepts JSONB NOT NULL DEFAULT '[]'::jsonb,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  is_dirty BOOLEAN NOT NULL DEFAULT FALSE,
+  last_used_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, session_id, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_state_keyframes_lookup
+ON state_keyframes(user_id, session_id, agent_id);
+

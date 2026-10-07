@@ -11,7 +11,7 @@ const API_BASE =
   (typeof window !== "undefined" && window.__APP_CONFIG__?.API_BASE_URL) ||
   import.meta.env.VITE_API_BASE_URL ||
   (typeof window !== "undefined" ? `http://${window.location.hostname}:5001` : "http://localhost:5001");
-const ANONYMOUS_DEFAULT_MODEL = "sambanova";
+const ANONYMOUS_DEFAULT_MODEL = "nvidia";
 const LANDING_QUICK_ACTIONS = [
   { id: "light", label: "Lightning", icon: ">>" },
   { id: "deep", label: "Deep research", icon: "◌" },
@@ -258,14 +258,16 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [deepSearchEnabled, setDeepSearchEnabled] = useState(false);
   const [availableModels, setAvailableModels] = useState([
-    { id: "groq", label: "groq", enabled: true },
+    { id: "nvidia", label: "Z-AI GLM 5.3", enabled: true },
     { id: "dino", label: "Dino_1.0", enabled: true },
-    { id: "sambanova", label: "SambaNova", enabled: true },
   ]);
   const [availableAgents, setAvailableAgents] = useState([]);
   const [selectedModel, setSelectedModel] = useState(() => {
-    const stored = localStorage.getItem("chatModel") || "groq";
-    return stored === "hf" ? "sambanova" : stored;
+    const stored = localStorage.getItem("chatModel") || "nvidia";
+    if (stored === "hf" || stored === "groq" || stored === "sambanova") {
+      return "nvidia";
+    }
+    return stored;
   });
   const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem("selectedAgentId") || "");
   const [attachedFiles, setAttachedFiles] = useState([]);
@@ -360,14 +362,14 @@ export default function App() {
   });
   const activeModelLabel = token
     ? (availableModels.find((m) => m.id === selectedModel)?.label || selectedModel)
-    : "SambaNova (Anonymous)";
+    : "Z-AI GLM 5.3 (Anonymous)";
   const selectedAgent = availableAgents.find((agent) => agent.id === selectedAgentId) || null;
   const selectedAgentLabel = selectedAgent?.shortLabel || selectedAgent?.label || "Agents";
   const getModelLabel = (modelId, fallback = null) => {
     const normalized = String(modelId || fallback || "").trim().toLowerCase();
     if (!normalized) return "";
     if (normalized === "generation_pipeline") return "Generation Pipeline";
-    if (normalized === "hf" || normalized === "sambanova") return "SambaNova";
+    if (normalized === "nvidia" || normalized === "hf" || normalized === "groq" || normalized === "sambanova") return "Z-AI GLM 5.3";
     if (normalized === "dino") return "Dino_1.0";
     return availableModels.find((m) => m.id === normalized)?.label || normalized;
   };
@@ -3369,7 +3371,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "nvidia")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3392,7 +3394,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "nvidia")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>
@@ -3406,7 +3408,7 @@ export default function App() {
                   >
                     <div className="message-avatar">{msg.role === "user" ? "U" : "AI"}</div>
                     <div className="bubble">
-                      {renderSender(msg, "sambanova")}
+                      {renderSender(msg, "nvidia")}
                       <div className="content">{renderMessageContent(msg.content)}</div>
                     </div>
                   </div>

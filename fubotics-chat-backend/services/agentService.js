@@ -3,11 +3,10 @@ const { buildRagContext, indexWebSourcesForRag } = require("./ragService");
 const knowledgeSourceModel = require("../models/knowledgeSource");
 const knowledgeChunkModel = require("../models/knowledgeChunk");
 
-const SAMBANOVA_API_KEY = process.env.SAMBANOVA_API_KEY || null;
-const SAMBANOVA_BASE_URL = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || null;
 const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "deepseek-v4";
+const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "z-ai/glm-5.3";
+const NVIDIA_FALLBACK_MODEL = process.env.NVIDIA_FALLBACK_MODEL || "meta/llama-3.2-11b-vision-instruct";
 
 /**
  * Helper to extract provider error message
@@ -44,51 +43,37 @@ async function sendNVIDIACompletion(messages, tools = null, toolChoice = "auto")
     payload.tool_choice = toolChoice;
   }
 
-  let response;
   try {
-    response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
+    const response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
       headers: {
         Authorization: `Bearer ${NVIDIA_API_KEY}`,
         "Content-Type": "application/json",
       },
       timeout: 60000,
     });
-  } catch (err) {
-    throw new Error(`NVIDIA completion failed: ${extractProviderError(err)}`);
+    return response.data.choices[0].message;
+  } catch (primaryErr) {
+    if (NVIDIA_CHAT_MODEL !== NVIDIA_FALLBACK_MODEL) {
+      console.warn(`[Agent Loop] Model "${NVIDIA_CHAT_MODEL}" failed (${primaryErr.message}). Retrying with fallback "${NVIDIA_FALLBACK_MODEL}"...`);
+      try {
+        const fallbackRes = await axios.post(
+          `${NVIDIA_BASE_URL}/chat/completions`,
+          { ...payload, model: NVIDIA_FALLBACK_MODEL },
+          {
+            headers: {
+              Authorization: `Bearer ${NVIDIA_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 30000,
+          }
+        );
+        return fallbackRes.data.choices[0].message;
+      } catch (fallbackErr) {
+        throw new Error(`NVIDIA completion failed: ${extractProviderError(primaryErr)}`);
+      }
+    }
+    throw new Error(`NVIDIA completion failed: ${extractProviderError(primaryErr)}`);
   }
-
-  return response.data.choices[0].message;
-}
-
-/**
- * Helper to send chat completions to the Web-based LLM API (SambaNova)
- */
-async function sendWebCompletion(messages, tools = null, toolChoice = "auto") {
-  if (!SAMBANOVA_API_KEY) {
-    throw new Error("Dino 1.0 Agent requires a valid Web LLM API Key (SambaNova).");
-  }
-
-  const payload = {
-    model: process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct",
-    messages,
-    temperature: 0.5,
-    max_tokens: 4096,
-  };
-
-  if (tools) {
-    payload.tools = tools;
-    payload.tool_choice = toolChoice;
-  }
-
-  const response = await axios.post(`${SAMBANOVA_BASE_URL}/chat/completions`, payload, {
-    headers: {
-      Authorization: `Bearer ${SAMBANOVA_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    timeout: 60000,
-  });
-
-  return response.data.choices[0].message;
 }
 
 const AGENT_TOOLS = [
@@ -197,12 +182,7 @@ Identity: You are Dino 1.0. You represent the cutting edge of Web-Integrated AI.
 
       let assistantMessage;
       try {
-        // Use NVIDIA completion for NVIDIA models, otherwise use SambaNova
-        if (model && model.toLowerCase().includes("deepseek") || model && model.toLowerCase().includes("nvidia")) {
-          assistantMessage = await sendNVIDIACompletion(conversationHistory, AGENT_TOOLS, "auto");
-        } else {
-          assistantMessage = await sendWebCompletion(conversationHistory, AGENT_TOOLS, "auto");
-        }
+        assistantMessage = await sendNVIDIACompletion(conversationHistory, AGENT_TOOLS, "auto");
       } catch (err) {
         console.error("[Agent Loop] LLM API call failed:", err.message);
 
@@ -210,11 +190,7 @@ Identity: You are Dino 1.0. You represent the cutting edge of Web-Integrated AI.
         // Retry once without tools so the user still gets an answer.
         if (String(err?.message || "").includes("HTTP 400")) {
           console.warn("[Agent Loop] Retrying without tools after provider rejected tool request.");
-          if (model && model.toLowerCase().includes("deepseek") || model && model.toLowerCase().includes("nvidia")) {
-            assistantMessage = await sendNVIDIACompletion(conversationHistory, null, "auto");
-          } else {
-            assistantMessage = await sendWebCompletion(conversationHistory, null, "auto");
-          }
+          assistantMessage = await sendNVIDIACompletion(conversationHistory, null, "auto");
         } else {
           throw err;
         }
@@ -352,5 +328,5 @@ Reason step-by-step and then use the tool if needed.`;
 module.exports = {
   runAgentLoop,
   runAgentLearning,
-  filterLowConfidenceChunks,
+  sendNVIDIACompletion,
 };

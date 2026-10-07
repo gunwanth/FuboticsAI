@@ -14,6 +14,8 @@ const {
   AGENT_ANNOTATIONS,
   classifyTokenBudget,
 } = require("../config/modelAnnotations");
+const semanticStateConfig = require("../config/semanticState");
+const semanticStateGraph = require("../services/semanticStateGraphService");
 
 const USER_AGENT =
   process.env.MCP_WEB_USER_AGENT ||
@@ -395,10 +397,41 @@ async function searchWeb(args) {
   const sources = await deepSearchWeb(query, maxResults);
 
   if (autoIndex && Number.isInteger(userId)) {
-    await indexWebSourcesForRag(userId, Number.isInteger(sessionId) ? sessionId : null, sources);
+    const parsedSessionId = Number.isInteger(sessionId) ? sessionId : null;
+    await indexWebSourcesForRag(userId, parsedSessionId, sources);
+    if (semanticStateConfig.enabled) {
+      semanticStateGraph
+        .recordWebObservation(userId, parsedSessionId, { query, sources })
+        .catch((err) => console.warn("[Semantic State] MCP web observation failed:", err?.message || err));
+    }
   }
 
   return { sources };
+}
+
+async function inspectState(args) {
+  const userId = Number.parseInt(args.userId, 10);
+  const sessionId = Number.parseInt(args.sessionId, 10);
+  const query = String(args.query || "").trim();
+  const agentId = String(args.agentId || "dino_agent").trim();
+
+  if (!Number.isInteger(userId)) throw new Error("userId is required");
+  const parsedSessionId = Number.isInteger(sessionId) ? sessionId : null;
+
+  const metaResult = await semanticStateGraph.buildMetaBridge(userId, parsedSessionId, agentId, {
+    task: query || "general assistance",
+  });
+  const neighborhood = await semanticStateGraph.findSemanticNeighborhood(userId, parsedSessionId, {
+    query: query || metaResult?.metaBridge || "general",
+    agentId,
+  });
+
+  return {
+    metaBridge: metaResult?.metaBridge || "",
+    neighborhoodNodes: (neighborhood.nodes || []).map((n) => ({ kind: n.kind, label: n.label, content: (n.content || "").slice(0, 200) })),
+    neighborhoodEdges: (neighborhood.edges || []).map((e) => ({ relation: e.relation, weight: e.weight })),
+    context: (neighborhood.context || "").slice(0, 4000),
+  };
 }
 
 async function storeKnowledge(args) {
@@ -435,6 +468,18 @@ async function storeKnowledge(args) {
     Number.isInteger(sessionId) ? sessionId : null,
     chunks
   );
+
+  if (semanticStateConfig.enabled) {
+    semanticStateGraph
+      .recordInsight(userId, Number.isInteger(sessionId) ? sessionId : null, {
+        sourceId: source.id,
+        agentId: "dino_agent",
+        tags,
+        content,
+        title,
+      })
+      .catch((err) => console.warn("[Semantic State] MCP insight record failed:", err?.message || err));
+  }
 
   return {
     stored: true,
@@ -639,6 +684,20 @@ const TOOL_DEFS = [
     },
   },
   {
+    name: "inspect_state",
+    description: "Inspect the semantic cognitive state: the agent meta-bridge, active reasoning-space nodes, and bridged agents whose state is contextually adjacent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        userId: { type: "integer" },
+        sessionId: { type: "integer" },
+        agentId: { type: "string" },
+        query: { type: "string", description: "Optional focus query to re-anchor the neighborhood." },
+      },
+      required: ["userId"],
+    },
+  },
+  {
     name: "store_knowledge",
     description: "Persist reusable knowledge into the knowledge base so the agent can learn over time.",
     inputSchema: {
@@ -740,6 +799,7 @@ const TOOL_DEFS = [
 const TOOL_HANDLERS = {
   search_rag: searchRag,
   deep_search_web: searchWeb,
+  inspect_state: inspectState,
   store_knowledge: storeKnowledge,
   list_project_files: listProjectFiles,
   search_codebase: searchCodebase,

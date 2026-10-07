@@ -1,4 +1,4 @@
-﻿const DEFAULT_INPUT_CHARS_PER_TOKEN = 4;
+const DEFAULT_INPUT_CHARS_PER_TOKEN = 4;
 
 function estimatePromptTokens(text) {
   const value = String(text || "");
@@ -22,13 +22,13 @@ function classifyTokenBudget({
       promptTokens,
       outputBudget: Math.max(
         baseRequested,
-        usesAgentLoop ? 1280 : usesWeb || hasAttachments ? 1024 : 768
+        usesAgentLoop ? 768 : usesWeb || hasAttachments ? 640 : 448
       ),
-      sparsity: "very_high",
+      sparsity: "ultra_high",
       notes: [
-        "Prioritize precise direct answers over exhaustive detail.",
-        "Use fewer web sources and shorter evidence windows.",
-        "Finalize earlier once enough evidence is available.",
+        "Prioritize immediate, direct answers over exhaustive detail.",
+        "Strictly minimize tool iterations and retrieval windows.",
+        "Finalize rapidly once minimal sufficient evidence is gathered.",
       ],
     };
   }
@@ -74,11 +74,11 @@ function classifyTokenBudget({
 }
 
 const MODEL_ANNOTATIONS = {
-  groq: {
-    id: "groq",
+  nvidia: {
+    id: "nvidia",
     role: "standard_llm",
-    provider: "Groq",
-    behavior: "fast_general_chat",
+    provider: "NVIDIA NIM (Z-AI GLM-5.3)",
+    behavior: "fast_general_chat_and_reasoning",
     learningMode: "none",
     toolAccess: "none",
     retrievalAccess: ["rag_injection", "optional_web_grounding"],
@@ -88,28 +88,12 @@ const MODEL_ANNOTATIONS = {
       sparsityStrategy: "drop_low_signal_context_before_generation",
       defaultOutputBudget: 2048,
     },
-    annotationTags: ["standard", "non-agentic", "chat-completions"],
-  },
-  sambanova: {
-    id: "sambanova",
-    role: "standard_llm",
-    provider: "SambaNova",
-    behavior: "general_chat_and_generation_support",
-    learningMode: "none",
-    toolAccess: "none",
-    retrievalAccess: ["rag_injection", "optional_web_grounding"],
-    tokenPolicy: {
-      inputCompression: "moderate",
-      outputStyle: "grounded_answer_with_refs",
-      sparsityStrategy: "prefer_ranked_context_over_full_raw_sources",
-      defaultOutputBudget: 2048,
-    },
-    annotationTags: ["standard", "non-agentic", "router-backed"],
+    annotationTags: ["standard", "non-agentic", "chat-completions", "z-ai"],
   },
   dino: {
     id: "dino",
     role: "agentic_llm",
-    provider: "Groq base + Dino agent loop",
+    provider: "NVIDIA Z-AI base + Dino agent loop",
     behavior: "web_connected_autonomous_reasoning",
     learningMode: "rag_memory_growth",
     toolAccess: ["search_rag", "deep_search_web", "store_knowledge"],
@@ -125,7 +109,7 @@ const MODEL_ANNOTATIONS = {
   coding_agent: {
     id: "coding_agent",
     role: "coding_specialist_agent",
-    provider: "Groq base + Coding agent loop",
+    provider: "NVIDIA Z-AI base + Coding agent loop",
     behavior: "dedicated_code_analysis_and_generation",
     learningMode: "code_insights_tagged",
     toolAccess: [
@@ -145,6 +129,10 @@ const MODEL_ANNOTATIONS = {
     annotationTags: ["code-specialist", "react-loop", "code-focused"],
   },
 };
+
+// Backward compatibility aliases
+MODEL_ANNOTATIONS.groq = MODEL_ANNOTATIONS.nvidia;
+MODEL_ANNOTATIONS.sambanova = MODEL_ANNOTATIONS.nvidia;
 
 const AGENT_ANNOTATIONS = {
   dino_agent: {

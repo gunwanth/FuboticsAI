@@ -15,7 +15,8 @@ const attachmentModel = {
    */
   async create(sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult = null, isGenerated = false) {
     const result = await db.query(
-      `INSERT INTO attachments (session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated)
+      `INSERT INTO attachments (session_id, filename, original_filename, 
+      file_path, file_type, file_size, analysis_result, is_generated)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
        RETURNING id, session_id, filename, original_filename, file_path, file_type, file_size, analysis_result, is_generated, created_at`,
       [sessionId, filename, originalFilename, filePath, fileType, fileSize, analysisResult, isGenerated]

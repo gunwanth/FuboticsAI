@@ -84,11 +84,26 @@ const chatSessionModel = {
       const deletedSessionNumber = target.rows[0].session_number;
 
       await client.query("DELETE FROM chat_sessions WHERE id = $1 AND user_id = $2", [sessionId, userId]);
+
+      // Renumber remaining sessions safely without unique constraint collisions
+      await client.query(
+        `WITH reordered AS (
+           SELECT id, ROW_NUMBER() OVER (ORDER BY session_number ASC, id ASC) AS new_num
+           FROM chat_sessions
+           WHERE user_id = $1
+         )
+         UPDATE chat_sessions cs
+         SET session_number = -reordered.new_num
+         FROM reordered
+         WHERE cs.id = reordered.id`,
+        [userId]
+      );
+
       await client.query(
         `UPDATE chat_sessions
-         SET session_number = session_number - 1
-         WHERE user_id = $1 AND session_number > $2`,
-        [userId, deletedSessionNumber]
+         SET session_number = -session_number
+         WHERE user_id = $1 AND session_number < 0`,
+        [userId]
       );
 
       await client.query("COMMIT");

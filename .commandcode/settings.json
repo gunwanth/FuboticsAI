@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(node -e const db = require('./db'); const g = require('./services/semanticStateGraphService'); (async () => { const r = await g.recordWebObservation(1, null, { query: 'test query', sources: [{ title: 'T', url: 'https://example.com', snippet: 'snippet' }] }); console.log('recordWebObservation:', JSON.stringify(r)); await db.pool.end(); })().catch(e => { console.error('ERR', e); process.exit(1); }); 2 >& 1)",
+      "Shell(findstr:*)",
+      "Shell(taskkill /PID 36512 /F /T 2>NUL & netstat -ano | findstr :5001 | findstr LISTENING)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

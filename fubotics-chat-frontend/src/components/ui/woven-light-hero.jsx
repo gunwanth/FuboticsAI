@@ -150,7 +150,7 @@ function WovenCanvas() {
     const clock = new THREE.Clock();
     const isDarkMode = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
 
-    const particleCount = 50000;
+    const particleCount = 12000;
     const positions = new Float32Array(particleCount * 3);
     const originalPositions = new Float32Array(particleCount * 3);
     const colors = new Float32Array(particleCount * 3);
@@ -183,7 +183,7 @@ function WovenCanvas() {
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
     const material = new THREE.PointsMaterial({
-      size: 0.02,
+      size: 0.024,
       vertexColors: true,
       blending: isDarkMode ? THREE.NormalBlending : THREE.AdditiveBlending,
       transparent: true,
@@ -209,6 +209,7 @@ function WovenCanvas() {
 
     const animate = () => {
       frameId = window.requestAnimationFrame(animate);
+      if (document.hidden) return;
       const elapsedTime = clock.getElapsedTime();
       mouseWorld.set(mouse.x * 3, mouse.y * 3, 0);
 

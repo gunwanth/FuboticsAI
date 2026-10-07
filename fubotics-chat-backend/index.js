@@ -46,6 +46,10 @@ const knowledgeSourceModel = require("./models/knowledgeSource");
 const knowledgeChunkModel = require("./models/knowledgeChunk");
 const { createImageGenerationService } = require("./services/imageGenerationService");
 const { listProjectFiles, searchCodebase, readProjectFile } = require("./services/codeToolsService");
+const semanticState = require("./config/semanticState");
+const semanticStateGraph = require("./services/semanticStateGraphService");
+const userProfileModel = require("./models/userProfile");
+const userContextService = require("./services/userContextService");
 
 const app = express();
 // API responses are user/session specific; disable ETag to avoid 304 responses with empty bodies
@@ -369,28 +373,25 @@ async function analyzeFile(filePath, fileType, originalFilename) {
 }
 
 // ---------- LLM / AI SETUP ----------
-const groqApiKey = process.env.GROQ_API_KEY || null;
-const groqBaseUrl = (process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1").replace(/\/+$/, "");
-const groqChatModel = process.env.GROQ_CHAT_MODEL || "llama-3.3-70b-versatile";
+const nvidiaApiKey = process.env.NVIDIA_API_KEY || null;
+const nvidiaBaseUrl = (process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1").replace(/\/+$/, "");
+const nvidiaChatModel = process.env.NVIDIA_CHAT_MODEL || "z-ai/glm-5.3";
+const nvidiaVisionModel = process.env.NVIDIA_VISION_MODEL || "meta/llama-3.2-11b-vision-instruct";
+const nvidiaFallbackModel = process.env.NVIDIA_FALLBACK_MODEL || "meta/llama-3.2-11b-vision-instruct";
+
 const dinoSelfLearningEnabled = String(process.env.DINO_SELF_LEARNING || "true").toLowerCase() === "true";
 // Keep Dino fast by default. Turn this on only if you want every Dino agent run to prefetch web sources.
 const dinoAlwaysWeb = String(process.env.DINO_ALWAYS_WEB || "false").toLowerCase() === "true";
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || process.env.HF_API_KEY || null;
 const hfRouterBaseUrl = (process.env.HF_ROUTER_BASE_URL || "https://router.huggingface.co/v1").replace(/\/+$/, "");
 const hfChatModel = process.env.HF_CHAT_MODEL || "katanemo/Arch-Router-1.5B:hf-inference";
-// Dino's base LLM runs on Groq.
-// Keep env override for flexibility.
-const dinoBaseModel = process.env.DINO_BASE_MODEL || process.env.DINO_GROQ_MODEL || process.env.GROQ_CHAT_MODEL || groqChatModel;
+// Dino's base LLM runs on NVIDIA Z-AI.
+const dinoBaseModel = process.env.DINO_BASE_MODEL || nvidiaChatModel;
 let hfChatPermissionDenied = false;
 const dinoAgentMaxIterations = Math.min(
   8,
   Math.max(1, Number.parseInt(process.env.DINO_AGENT_MAX_ITERATIONS || "3", 10))
 );
-const sambaNovaApiKey = process.env.SAMBANOVA_API_KEY || null;
-const sambaNovaBaseUrl = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
-const sambaNovaChatModel = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
-const sambaNovaPromptModel = process.env.SAMBANOVA_IMAGE_PROMPT_MODEL || "Meta-Llama-3.3-70B-Instruct";
-const sambaNovaVisionModel = process.env.SAMBANOVA_VISION_MODEL || "Llama-4-Maverick-17B-128E-Instruct";
 const freepikEnabled = String(process.env.ENABLE_FREEPIK || "false").toLowerCase() === "true";
 const freepikApiKey = freepikEnabled ? process.env.FREEPIK_API_KEY || null : null;
 const freepikImageModel = process.env.FREEPIK_IMAGE_MODEL || "flux-pro-v1-1";
@@ -426,28 +427,22 @@ const extractionMaxChars = Math.min(
 );
 
 const CHAT_MODELS = {
-  groq: {
-    id: "groq",
-    label: "groq",
-    enabled: Boolean(groqApiKey),
-    model: groqChatModel,
-  },
-  sambanova: {
-    id: "sambanova",
-    label: "SambaNova",
-    enabled: Boolean(sambaNovaApiKey),
-    model: sambaNovaChatModel,
+  nvidia: {
+    id: "nvidia",
+    label: "Z-AI GLM 5.3",
+    enabled: Boolean(nvidiaApiKey),
+    model: nvidiaChatModel,
   },
   dino: {
     id: "dino",
     label: "Dino_1.0",
-    enabled: Boolean(groqApiKey),
+    enabled: Boolean(nvidiaApiKey),
     model: dinoBaseModel,
   },
 };
 
 const defaultChatModel =
-  ["groq", "sambanova", "dino"].find((id) => CHAT_MODELS[id]?.enabled) || "groq";
+  ["nvidia", "dino"].find((id) => CHAT_MODELS[id]?.enabled) || "nvidia";
 
 function createFallbackPng(prompt = "") {
   const width = 768;
@@ -534,9 +529,6 @@ const imageGenerationService = createImageGenerationService({
   generatedDir,
   buildGeneratedFilename,
   createFallbackPng,
-  sambaNovaApiKey,
-  sambaNovaBaseUrl,
-  sambaNovaPromptModel,
   nvidiaApiKey: process.env.NVIDIA_API_KEY,
   nvidiaBaseUrl: process.env.NVIDIA_BASE_URL,
   nvidiaImageModel: process.env.NVIDIA_IMAGE_MODEL,
@@ -688,33 +680,35 @@ function resolveAnswerProfile({
     conversationState,
     tokenPolicy,
     maxTokens: conversationState.likelyCasual && !usesWeb && !usesAgentLoop && !hasAttachments
-      ? Math.min(tokenPolicy.outputBudget, lightning ? 384 : 640)
+      ? Math.min(tokenPolicy.outputBudget, lightning ? 256 : 640)
       : conversationState.asksDepth && !lightning
         ? Math.max(tokenPolicy.outputBudget, 1536)
-        : tokenPolicy.outputBudget,
+        : lightning
+          ? Math.min(tokenPolicy.outputBudget, 512)
+          : tokenPolicy.outputBudget,
     temperature:
       conversationState.emotionalTone === "frustrated"
         ? 0.35
         : lightning
-          ? 0.25
+          ? 0.2
           : thinking
             ? 0.5
             : 0.65,
     webMaxResults: lightning ? Math.min(2, deepSearchMaxResults) : deepSearchMaxResults,
-    ragLimit: lightning ? (usesWeb || thinking || usesAgentLoop ? 4 : 3) : usesWeb || thinking || usesAgentLoop ? 8 : 6,
+    ragLimit: lightning ? (usesWeb || thinking || usesAgentLoop ? 3 : 2) : usesWeb || thinking || usesAgentLoop ? 8 : 6,
     agentMaxIterations:
       conversationState.likelyCasual && !conversationState.asksDepth && !usesWeb && !thinking
         ? 1
         : lightning
-          ? Math.min(2, dinoAgentMaxIterations)
+          ? 1
           : dinoAgentMaxIterations,
-    codePrefetchLimit: lightning ? 4 : 8,
-    finalizeMaxTokens: lightning ? Math.min(900, tokenPolicy.outputBudget) : Math.min(1800, tokenPolicy.outputBudget),
-    sourceSliceLimit: lightning ? Math.min(2, deepSearchMaxResults) : deepSearchMaxResults,
-    evidenceCharLimit: lightning ? 1400 : 2200,
+    codePrefetchLimit: lightning ? 2 : 8,
+    finalizeMaxTokens: lightning ? Math.min(512, tokenPolicy.outputBudget) : Math.min(1800, tokenPolicy.outputBudget),
+    sourceSliceLimit: lightning ? Math.min(1, deepSearchMaxResults) : deepSearchMaxResults,
+    evidenceCharLimit: lightning ? 800 : 2200,
     systemInstruction: [
       lightning
-        ? "Lightning mode is ON. Answer fast, directly, and precisely. Prefer the smallest useful evidence set and avoid extended elaboration unless the user explicitly asks for detail."
+        ? "Lightning mode is ACTIVE. Answer with ultra-low latency: deliver the direct answer concisely in 1-3 sentences or focused bullet points. Omit conversational filler, disclaimers, or excessive elaboration."
         : "",
       conversationState.likelyCasual && !conversationState.asksDepth
         ? "This looks like a normal conversational turn. Keep the reply natural, short, and low-friction."
@@ -738,11 +732,11 @@ function stripCodeFence(value) {
 }
 
 async function analyzeImageWithVision(filePath, fileType, originalFilename) {
-  if (!sambaNovaApiKey) {
+  if (!nvidiaApiKey) {
     return JSON.stringify({
       type: "image",
       filename: originalFilename,
-      summary: "Image uploaded. Vision analysis unavailable because SAMBANOVA_API_KEY is not configured.",
+      summary: "Image uploaded. Vision analysis unavailable because NVIDIA_API_KEY is not configured.",
       extracted_text: `Image file ${originalFilename}. Vision analysis unavailable.`,
     });
   }
@@ -756,9 +750,9 @@ async function analyzeImageWithVision(filePath, fileType, originalFilename) {
   ].join("\n");
 
   const response = await axios.post(
-    `${sambaNovaBaseUrl}/chat/completions`,
+    `${nvidiaBaseUrl}/chat/completions`,
     {
-      model: sambaNovaVisionModel,
+      model: nvidiaVisionModel,
       max_tokens: 700,
       temperature: 0.2,
       messages: [
@@ -774,7 +768,7 @@ async function analyzeImageWithVision(filePath, fileType, originalFilename) {
     {
       timeout: 45000,
       headers: {
-        Authorization: `Bearer ${sambaNovaApiKey}`,
+        Authorization: `Bearer ${nvidiaApiKey}`,
         "Content-Type": "application/json",
       },
     }
@@ -865,7 +859,7 @@ Return only final content (no meta commentary).`;
     { role: "system", content: "You are a professional content generator." },
     { role: "user", content: contentPrompt },
   ];
-  const response = await sendSambaNovaCompletion(messages, 2500, 0.6);
+  const response = await sendNvidiaCompletion(messages, 2500, 0.6);
   return response?.trim() || prompt;
 }
 
@@ -912,7 +906,7 @@ async function suggestSessionNameFromPrompt(prompt) {
       { role: "system", content: "Generate a short, clear chat title (max 6 words). Return title only." },
       { role: "user", content: raw },
     ];
-    const response = await sendSambaNovaCompletion(messages, 20, 0.2);
+    const response = await sendNvidiaCompletion(messages, 20, 0.2);
     const title = (response || "")
       .replace(/["`]/g, "")
       .replace(/\s+/g, " ")
@@ -1642,21 +1636,13 @@ Rules:
 
   let msg = null;
   try {
-    if (selectedModel === "groq" || selectedModel === "dino") {
-      msg = await sendGroqChatMessage(messages, {
-        maxTokens: 1400,
-        temperature: 0.2,
-        tools: null,
-        toolChoice: null,
-        model: selectedModel === "dino" ? CHAT_MODELS.dino.model : CHAT_MODELS.groq.model,
-      });
-    } else if (selectedModel === "sambanova") {
-      msg = {
-        content: await sendSambaNovaCompletion(messages, 1400, 0.2, CHAT_MODELS.sambanova.model),
-      };
-    } else {
-      throw new Error(`Unsupported model for chart generation: ${selectedModel}`);
-    }
+    msg = await sendNvidiaChatMessage(messages, {
+      maxTokens: 1400,
+      temperature: 0.2,
+      tools: null,
+      toolChoice: null,
+      model: selectedModel === "dino" ? CHAT_MODELS.dino.model : CHAT_MODELS.nvidia.model,
+    });
   } catch (err) {
     throw new Error(`Chart spec generation failed on "${modelLabel}": ${err?.message || err}`);
   }
@@ -1743,8 +1729,8 @@ function detectGenerationRequest(content) {
 
 function resolvePreferredChatModel(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "hf") {
-    return CHAT_MODELS.sambanova?.enabled ? "sambanova" : defaultChatModel;
+  if (normalized === "hf" || normalized === "groq" || normalized === "sambanova") {
+    return CHAT_MODELS.nvidia?.enabled ? "nvidia" : defaultChatModel;
   }
   if (normalized && CHAT_MODELS[normalized]) return normalized;
   return defaultChatModel;
@@ -1849,29 +1835,73 @@ async function postChatCompletionsWithRetry({
   throw new Error(`${providerLabel} API error: retry loop exhausted`);
 }
 
-async function sendGroqChatMessage(
+async function sendNvidiaChatMessage(
   messages,
   { maxTokens, temperature, tools = null, toolChoice = "auto", model = null } = {}
 ) {
-  const data = await postChatCompletionsWithRetry({
-    url: `${groqBaseUrl}/chat/completions`,
-    payload: {
-      model: model || CHAT_MODELS.groq.model,
-      messages,
-      max_tokens: maxTokens,
-      temperature,
-      ...(tools ? { tools, tool_choice: toolChoice } : {}),
-    },
-    headers: {
-      Authorization: `Bearer ${groqApiKey}`,
-      "Content-Type": "application/json",
-    },
-    timeoutMs: 45000,
-    providerLabel: "Groq",
-    maxRetries: 2,
-  });
-  return data?.choices?.[0]?.message || null;
+  const targetModel = model || CHAT_MODELS.nvidia?.model || nvidiaChatModel;
+  const url = `${nvidiaBaseUrl}/chat/completions`;
+  const authHeader = `Bearer ${nvidiaApiKey}`;
+  const provider = "NVIDIA";
+
+  try {
+    const data = await postChatCompletionsWithRetry({
+      url,
+      payload: {
+        model: targetModel,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        ...(tools ? { tools, tool_choice: toolChoice } : {}),
+      },
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+      timeoutMs: 30000,
+      providerLabel: provider,
+      maxRetries: 1,
+    });
+    return data?.choices?.[0]?.message || null;
+  } catch (primaryErr) {
+    if (nvidiaFallbackModel && targetModel !== nvidiaFallbackModel) {
+      console.warn(`[NVIDIA AI] Model "${targetModel}" failed (${primaryErr.message}). Retrying with fallback "${nvidiaFallbackModel}"...`);
+      try {
+        const fallbackData = await postChatCompletionsWithRetry({
+          url,
+          payload: {
+            model: nvidiaFallbackModel,
+            messages,
+            max_tokens: maxTokens,
+            temperature,
+            ...(tools ? { tools, tool_choice: toolChoice } : {}),
+          },
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          timeoutMs: 25000,
+          providerLabel: "NVIDIA Fallback",
+          maxRetries: 1,
+        });
+        return fallbackData?.choices?.[0]?.message || null;
+      } catch (fallbackErr) {
+        throw primaryErr;
+      }
+    }
+    throw primaryErr;
+  }
 }
+
+const sendGroqChatMessage = sendNvidiaChatMessage;
+
+async function sendNvidiaCompletion(messages, maxTokens, temperature, model = null) {
+  const msg = await sendNvidiaChatMessage(messages, { maxTokens, temperature, model });
+  return msg?.content || "";
+}
+
+const sendGroqCompletion = sendNvidiaCompletion;
+const sendSambaNovaCompletion = sendNvidiaCompletion;
 
 async function sendHfRouterChatMessage(
   messages,
@@ -2025,59 +2055,8 @@ function isAutoToolChoiceUnsupportedError(err) {
 }
 
 async function sendDinoChatMessage(messages, options) {
-  // Dino is a persona/agentic wrapper; its base LLM runs on Groq.
-  return sendGroqChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
-}
-
-async function sendGroqCompletion(messages, maxTokens, temperature, model = null) {
-  const msg = await sendGroqChatMessage(messages, { maxTokens, temperature, model });
-  return msg?.content || "";
-}
-
-let sambaNovaChatQueue = Promise.resolve();
-async function enqueueSambaNovaChat(task) {
-  const previous = sambaNovaChatQueue;
-  let release;
-  sambaNovaChatQueue = new Promise((resolve) => {
-    release = resolve;
-  });
-  await previous;
-  try {
-    return await task();
-  } finally {
-    release();
-  }
-}
-
-async function sendSambaNovaChatMessage(
-  messages,
-  { maxTokens, temperature, tools = null, toolChoice = "auto", model = null } = {}
-) {
-  return enqueueSambaNovaChat(async () => {
-    const data = await postChatCompletionsWithRetry({
-      url: `${sambaNovaBaseUrl}/chat/completions`,
-      payload: {
-        model: model || sambaNovaChatModel,
-        messages,
-        max_tokens: maxTokens,
-        temperature,
-        ...(tools ? { tools, tool_choice: toolChoice } : {}),
-      },
-      headers: {
-        Authorization: `Bearer ${sambaNovaApiKey}`,
-        "Content-Type": "application/json",
-      },
-      timeoutMs: 45000,
-      providerLabel: "SambaNova",
-      maxRetries: 3,
-    });
-    return data?.choices?.[0]?.message || null;
-  });
-}
-
-async function sendSambaNovaCompletion(messages, maxTokens, temperature, model = null) {
-  const msg = await sendSambaNovaChatMessage(messages, { maxTokens, temperature, model });
-  return msg?.content || "";
+  // Dino is a persona/agentic wrapper; its base LLM runs on NVIDIA Z-AI.
+  return sendNvidiaChatMessage(messages, { ...options, model: CHAT_MODELS.dino.model });
 }
 
 async function getAIReply(
@@ -2157,27 +2136,12 @@ async function getAIReply(
       return `Selected model "${selectedModel}" is not configured or unavailable. Please select another model and retry.`;
     }
 
-    if (selectedModel === "groq") {
+    if (selectedModel === "nvidia" || selectedModel === "groq" || selectedModel === "sambanova") {
       try {
-        const groqReply = await sendGroqCompletion(messages, maxTokens, answerProfile.temperature);
-        return groqReply || "No reply from AI";
+        const reply = await sendNvidiaCompletion(messages, maxTokens, answerProfile.temperature, CHAT_MODELS.nvidia?.model);
+        return reply || "No reply from AI";
       } catch (err) {
-        console.warn("Groq chat failed:", err?.message || err);
-        return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
-      }
-    }
-
-    if (selectedModel === "sambanova") {
-      try {
-        const msg = await sendSambaNovaCompletion(
-          messages,
-          maxTokens,
-          answerProfile.temperature,
-          CHAT_MODELS.sambanova.model
-        );
-        return msg || "No reply from AI";
-      } catch (err) {
-        console.warn(`${selectedModel} chat failed:`, err?.message || err);
+        console.warn("NVIDIA chat failed:", err?.message || err);
         return `Selected model "${selectedConfig.label}" failed: ${err?.message || "request error"}. Please retry or switch model manually.`;
       }
     }
@@ -2325,6 +2289,19 @@ const DINO_AGENT_TOOLS = [
         properties: {
           scope: { type: "string", description: "quick or full" },
           includeBuild: { type: "boolean", description: "Whether to include a build check." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inspect_state",
+      description: "Inspect the current semantic cognitive state: the agent meta-bridge, active reasoning-space nodes, and bridged agents whose state is contextually adjacent.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional focus query to re-anchor the neighborhood on." },
         },
       },
     },
@@ -2693,7 +2670,14 @@ async function executeDinoToolLocally(name, args, userId, sessionId, deepSearchW
   if (name === "deep_search_web") {
     const sources = await deepSearchWebFn(String(args.query || ""));
     if (sources && sources.length > 0) {
-      await indexWebSourcesForRag(userId, sessionId, sources);
+      indexWebSourcesForRag(userId, sessionId, sources).catch((err) =>
+        console.warn("[Web RAG] Background indexing error:", err?.message || err)
+      );
+      if (semanticState.enabled) {
+        semanticStateGraph
+          .recordWebObservation(userId, sessionId, { query: String(args.query || ""), sources })
+          .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
+      }
     }
     return {
       display:
@@ -2701,6 +2685,27 @@ async function executeDinoToolLocally(name, args, userId, sessionId, deepSearchW
           ? sources.map((s) => `Title: ${s.title}\nURL: ${s.url}\nSnippet: ${s.snippet}`).join("\n\n")
           : "No results found on the web.",
       raw: { sources: sources || [] },
+    };
+  }
+
+  if (name === "inspect_state") {
+    const focus = String(args.query || "").trim();
+    const metaResult = await semanticStateGraph.buildMetaBridge(userId, sessionId, "dino_agent", {
+      task: focus || String(args.query || ""),
+    });
+    const neighborhood = await semanticStateGraph.findSemanticNeighborhood(userId, sessionId, {
+      query: focus || String(args.query || ""),
+      agentId: "dino_agent",
+    });
+    const display = [
+      metaResult?.metaBridge ? `[Meta-Bridge]\n${metaResult.metaBridge}` : "",
+      neighborhood?.context ? `[Semantic Neighborhood]\n${neighborhood.context}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    return {
+      display: display || "No cognitive state available yet. Run a deep search or store knowledge to build state.",
+      raw: { metaBridge: metaResult?.metaBridge || "", neighborhood: neighborhood?.nodes?.map((n) => n.label) || [] },
     };
   }
 
@@ -3004,6 +3009,17 @@ async function storeLearnedKnowledgeEntry(userId, sessionId, payload = {}, optio
   }));
 
   await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+  if (semanticState.enabled) {
+    semanticStateGraph
+      .recordInsight(userId, sessionId, {
+        sourceId: source.id,
+        agentId: String(options.sourceAgentId || options.sourceAgent || "dino_agent"),
+        tags,
+        content: safeContent,
+        title,
+      })
+      .catch((err) => console.warn("[Semantic State] Insight record failed:", err?.message || err));
+  }
   return { sourceId: source.id, title, chunkCount: chunks.length, knowledgeKind };
 }
 
@@ -3195,6 +3211,11 @@ Rules:
             } catch (err) {
               console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
             }
+            if (semanticState.enabled) {
+              semanticStateGraph
+                .recordWebObservation(userId, sessionId, { query: String(userQuery || ""), sources: preSources })
+                .catch((err) => console.warn("[Semantic State] Prefetch web observation failed:", err?.message || err));
+            }
             const sourceLines = preSources
               .slice(0, answerProfile.sourceSliceLimit)
               .map(
@@ -3338,6 +3359,39 @@ Rules:
 12. ${answerProfile.conversationState.likelyCasual ? "If the user is just chatting or asking a simple question, answer directly and skip tool calls unless freshness or repository detail is clearly needed." : "Use tools only when they clearly sharpen the answer."}`,
   };
 
+  // Meta-bridge + semantic neighborhood injection (bounded, non-fatal; skipped in lightning mode for ultra-low latency).
+  let dinoCognitiveState = null;
+  if (semanticState.enabled && !lightning) {
+    try {
+      dinoCognitiveState = await semanticStateGraph.observeAndSyncAgentState(userId, sessionId, "dino_agent", {
+        task: String(userQuery || ""),
+        sessionHistory: historyMessages,
+        capabilityOverrides: DINO_AGENT_TOOLS.map((t) => t.function.name),
+      });
+      if (dinoCognitiveState?.metaBridge) {
+        systemMessage.content += `\n\n[Cognitive State — your current meta-bridge]\n${dinoCognitiveState.metaBridge}`;
+      }
+      if (dinoCognitiveState?.neighborhoodNodes?.length) {
+        const labels = dinoCognitiveState.neighborhoodNodes.map((n) => `${n.kind}:${n.label}`).join(" | ");
+        systemMessage.content += `\n[Semantic Neighborhood]\n${labels}`;
+      }
+    } catch (err) {
+      console.warn("[Dino] Cognitive state injection failed:", err?.message || err);
+    }
+  }
+
+  // Persistent User Profile & Context injection
+  if (userId) {
+    try {
+      const userCtx = await userContextService.getUserContext(userId, userQuery);
+      if (userCtx?.promptBlock) {
+        systemMessage.content += `\n\n${userCtx.promptBlock}`;
+      }
+    } catch (err) {
+      console.warn("[Dino] User context retrieval failed:", err?.message || err);
+    }
+  }
+
   if (conversationHistory[0]?.role !== "system") {
     conversationHistory.unshift(systemMessage);
   }
@@ -3417,12 +3471,15 @@ Rules:
   if (proactiveWebGrounding) {
     prefetchPromises.push(
       deepSearchWebFn(String(userQuery || "").trim())
-        .then(async (preSources) => {
+        .then((preSources) => {
           if (preSources && preSources.length > 0) {
-            try {
-              await indexWebSourcesForRag(userId, sessionId, preSources);
-            } catch (err) {
-              console.error("[Dino] Prefetch web indexing failed:", err?.message || err);
+            indexWebSourcesForRag(userId, sessionId, preSources).catch((err) =>
+              console.warn("[Dino] Background prefetch web indexing failed:", err?.message || err)
+            );
+            if (semanticState.enabled) {
+              semanticStateGraph
+                .recordWebObservation(userId, sessionId, { query: String(userQuery || ""), sources: preSources })
+                .catch((err) => console.warn("[Semantic State] Prefetch web observation failed:", err?.message || err));
             }
             const sourceLines = preSources
               .slice(0, answerProfile.sourceSliceLimit)
@@ -3495,6 +3552,30 @@ Rules:
     conversationHistory.push(assistantMessage);
 
     if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+      const content = String(assistantMessage.content || "").trim();
+      const parsedTextTool = extractFirstJsonObject(content);
+      const isToolCall =
+        parsedTextTool &&
+        typeof parsedTextTool === "object" &&
+        (parsedTextTool.name || (parsedTextTool.action === "tool" && parsedTextTool.name));
+
+      if (isToolCall) {
+        const toolName = String(parsedTextTool.name || "").trim();
+        const toolArgs = parsedTextTool.parameters || parsedTextTool.arguments || {};
+        let result = "";
+        try {
+          const toolRun = await executeDinoTool(toolName, toolArgs, userId, sessionId, deepSearchWebFn);
+          result = toolRun.display;
+        } catch (err) {
+          result = `Error executing ${toolName}: ${err.message}`;
+        }
+        conversationHistory.push({
+          role: "system",
+          content: buildDinoToolResultMessage(toolName, result),
+        });
+        continue;
+      }
+
       if (returnTranscript) {
         return {
           finalDraft: assistantMessage.content || "",
@@ -3551,19 +3632,37 @@ Rules:
     toolChoice: null,
   });
 
+  const finalReply = String(finalAssistantMessage?.content || "").trim() || "I reached my reasoning limit without a final answer.";
+
+  // Self-improvement: record the traversal and feed outcome back into the
+  // graph statistics (fire-and-forget, never blocks the reply).
+  if (semanticState.enabled) {
+    semanticStateGraph
+      .runCognitiveFeedbackLoop(userId, sessionId, {
+        agentId: "dino_agent",
+        query: String(userQuery || ""),
+        goal: String(userQuery || ""),
+        neighborhood: dinoCognitiveState?.neighborhoodNodes?.length ? { nodes: dinoCognitiveState.neighborhoodNodes, edges: [] } : null,
+        replyText: finalReply,
+        citationCount: (finalReply.match(/\[RAG \d+\]|Sources:|https?:\/\//g) || []).length,
+        latencyMs: 0,
+      })
+      .catch((err) => console.warn("[Semantic State] Dino feedback loop failed:", err?.message || err));
+  }
+
   if (returnTranscript) {
     return {
-      finalDraft: String(finalAssistantMessage?.content || "").trim() || "I reached my reasoning limit without a final answer.",
+      finalDraft: finalReply,
       conversationHistory: [
         ...conversationHistory,
         {
           role: "assistant",
-          content: String(finalAssistantMessage?.content || "").trim(),
+          content: finalReply,
         },
       ],
     };
   }
-  return String(finalAssistantMessage?.content || "").trim() || "I reached my reasoning limit without a final answer.";
+  return finalReply;
 }
 
 async function runDinoAgentLearning(userId, sessionId, userMessage, assistantReply, options = {}) {
@@ -3685,9 +3784,6 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/models", (req, res) => {
-  if (CHAT_MODELS?.sambanova) {
-    CHAT_MODELS.sambanova.enabled = Boolean(sambaNovaApiKey);
-  }
   const models = Object.values(CHAT_MODELS).map((item) => ({
     id: item.id,
     label: item.label,
@@ -3928,7 +4024,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         await messageModel.create(
           parsedSessionId,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
+          'Selected model "Dino 1.0" is unavailable because NVIDIA_API_KEY is not configured.',
           selectedModelId
         );
         const messages = await messageModel.getBySessionId(parsedSessionId);
@@ -3947,16 +4043,43 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
           } catch (indexErr) {
             console.error("Web RAG indexing failed:", indexErr?.message || indexErr);
           }
+          if (semanticState.enabled) {
+            semanticStateGraph
+              .recordWebObservation(req.user.id, parsedSessionId, { query: content, sources })
+              .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
+          }
         }
+
+        const isLightning = !!lightning;
+        const answerProfile = resolveAnswerProfile({
+          promptText: content,
+          hasAttachments: sessionAttachments.length > 0,
+          usesWeb: sources.length > 0,
+          usesAgentLoop: false,
+          thinking: false,
+          lightning: isLightning,
+          requestedMaxTokens: sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens,
+        });
+
         const crossChatContext = shouldReviewAcrossChats(content)
           ? await getCrossChatContext(req.user.id, parsedSessionId)
           : "";
-        const ragContextResult = await buildRagContext(req.user.id, parsedSessionId, content, deepSearch ? 8 : 6, 0.15, 0.2);
+        const ragContextResult = await buildRagContext(
+          req.user.id,
+          parsedSessionId,
+          content,
+          answerProfile.ragLimit,
+          0.15,
+          0.2
+        );
         const combinedContext = [crossChatContext, ragContextResult.context].filter(Boolean).join("\n\n");
 
         // Build the exact same prompt as getAIReply() would, but stream the completion.
         let systemContent =
           "You are Dino 1.0, an advanced NexaCore AI. You have powerful reasoning capabilities and access to indexed knowledge.";
+        if (answerProfile.systemInstruction) {
+          systemContent += `\n\n${answerProfile.systemInstruction}`;
+        }
         if (sessionAttachments.length > 0) {
           systemContent += "\n\nYou have access to the following files uploaded in this conversation:\n";
           for (const att of sessionAttachments) {
@@ -3993,29 +4116,71 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
           systemContent += "\n\nUse it only if relevant to the current user request.";
         }
 
+        // Cognitive-state: try fast-path keyframe first, fall back to buildMetaBridge
+        if (semanticState.enabled && !isLightning) {
+          try {
+            const kfResult = await semanticStateGraph.tryKeyframeFastPath(req.user.id, parsedSessionId, "dino_agent");
+            if (kfResult?.hit && kfResult.prebakedBlock) {
+              systemContent += `\n\n[Cognitive State - Keyframe Fast-Path]\n${kfResult.prebakedBlock}`;
+            } else {
+              const cognitiveState = await semanticStateGraph.buildMetaBridge(req.user.id, parsedSessionId, "dino_agent", {
+                task: content,
+                sessionHistory: history,
+                capabilityOverrides: DINO_AGENT_TOOLS.map((t) => t.function.name),
+              });
+              if (cognitiveState?.metaBridge) {
+                systemContent += `\n\n[Cognitive State]\n${cognitiveState.metaBridge}`;
+                // Save keyframe snapshot asynchronously (non-blocking)
+                semanticStateGraph.saveKeyframe(req.user.id, parsedSessionId, "dino_agent", {
+                  turnAnchor: (history || []).length + 1,
+                  compositeEmbedding: cognitiveState.metaEmbedding || [],
+                  prebakedPromptBlock: cognitiveState.metaBridge,
+                  activeNodeIds: (cognitiveState.neighborhoodNodes || []).map((n) => n.id),
+                }).catch(() => {});
+              }
+            }
+          } catch (stateErr) {
+            console.warn("[Dino] Cognitive state injection failed:", stateErr?.message || stateErr);
+          }
+        }
+
+        // Persistent User Profile & Context injection
+        try {
+          const userCtx = await userContextService.getUserContext(req.user.id, content, {
+            limit: isLightning ? 1 : 3,
+            maxChars: isLightning ? 300 : 800,
+          });
+          if (userCtx?.promptBlock) {
+            systemContent += `\n\n${userCtx.promptBlock}`;
+          }
+        } catch (uErr) {
+          console.warn("[User Context] Prompt injection error:", uErr?.message || uErr);
+        }
+
         const messagesForModel = [
           { role: "system", content: systemContent },
           ...history.map((m) => ({ role: m.role, content: m.content || "" })),
         ];
 
-        const maxTokens = sources.length > 0 ? aiDeepSearchMaxTokens : aiDefaultMaxTokens;
+        const maxTokens = answerProfile.maxTokens;
+        const temperature = answerProfile.temperature;
         let streamedAny = false;
         try {
           aiReply = await streamOpenAICompatibleChatCompletions({
-            url: `${groqBaseUrl}/chat/completions`,
+            url: `${nvidiaBaseUrl}/chat/completions`,
             payload: {
               model: CHAT_MODELS.dino.model,
               messages: messagesForModel,
               max_tokens: maxTokens,
-              temperature: 0.7,
+              temperature,
               stream: true,
             },
             headers: {
-              Authorization: `Bearer ${groqApiKey}`,
+              Authorization: `Bearer ${nvidiaApiKey}`,
               "Content-Type": "application/json",
             },
-            timeoutMs: 45000,
-            providerLabel: "Groq (Dino base)",
+            timeoutMs: 60000,
+            providerLabel: "NVIDIA Z-AI (Dino base)",
             onDelta: (delta) => {
               streamedAny = true;
               sseSend(res, "delta", { delta });
@@ -4028,7 +4193,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
             aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
           } else if (!streamedAny) {
             // Fallback to non-stream completion so the user still gets an answer.
-            const msg = await sendGroqChatMessage(messagesForModel, {
+            const msg = await sendNvidiaChatMessage(messagesForModel, {
               maxTokens,
               temperature: 0.7,
               model: CHAT_MODELS.dino.model,
@@ -4083,7 +4248,7 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
           let streamedAny = false;
           try {
             aiReply = await streamOpenAICompatibleChatCompletions({
-              url: `${groqBaseUrl}/chat/completions`,
+              url: `${nvidiaBaseUrl}/chat/completions`,
               payload: {
                 model: CHAT_MODELS.dino.model,
                 messages: finalMessages,
@@ -4092,11 +4257,11 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
                 stream: true,
               },
               headers: {
-                Authorization: `Bearer ${groqApiKey}`,
+                Authorization: `Bearer ${nvidiaApiKey}`,
                 "Content-Type": "application/json",
               },
-              timeoutMs: 45000,
-              providerLabel: "Groq (Dino Agent Final)",
+              timeoutMs: 60000,
+              providerLabel: "NVIDIA Z-AI (Dino Agent Final)",
               onDelta: (delta) => {
                 streamedAny = true;
                 sseSend(res, "delta", { delta });
@@ -4133,12 +4298,17 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
       }
 
+      // Background persistent user memory extraction
+      userContextService.extractAndSaveUserMemory(req.user.id, parsedSessionId, content, codeExport.content).catch((err) =>
+        console.warn("[User Context] Background memory extraction failed:", err?.message || err)
+      );
+
       const messages = await messageModel.getBySessionId(parsedSessionId);
       sseSend(res, "final", { messages });
       return res.end();
     }
 
-    // Standard models stream path (groq/sambanova).
+    // Standard models stream path (nvidia).
     const history = await messageModel.getBySessionId(parsedSessionId);
     const sources = deepSearch ? await deepSearchWeb(content) : [];
     if (sources.length > 0) {
@@ -4146,6 +4316,11 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
       } catch (err) {
         console.error("Web RAG indexing failed:", err?.message || err);
+      }
+      if (semanticState.enabled) {
+        semanticStateGraph
+          .recordWebObservation(req.user.id, parsedSessionId, { query: content, sources })
+          .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
       }
     }
     const crossChatContext = shouldReviewAcrossChats(content)
@@ -4201,6 +4376,16 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
         "\n\nThinking mode is ON. Think deeply, reason step-by-step internally, and provide a clear, well-structured answer.";
     }
 
+    // Persistent User Profile & Context injection
+    try {
+      const userCtx = await userContextService.getUserContext(req.user.id, content);
+      if (userCtx?.promptBlock) {
+        systemContent += `\n\n${userCtx.promptBlock}`;
+      }
+    } catch (uErr) {
+      console.warn("[User Context] Prompt injection error:", uErr?.message || uErr);
+    }
+
     const messagesForModel = [
       { role: "system", content: systemContent },
       ...history.map((m) => ({ role: m.role, content: m.content || "" })),
@@ -4211,56 +4396,34 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
 
     let streamedAny = false;
     try {
-      if (selectedModelId === "groq") {
-        aiReply = await streamOpenAICompatibleChatCompletions({
-          url: `${sambaNovaBaseUrl}/chat/completions`,
-          payload: {
-            model: CHAT_MODELS.groq.model,
-            messages: messagesForModel,
-            max_tokens: maxTokens,
-            temperature: 0.7,
-            stream: true,
-          },
-          headers: {
-            Authorization: `Bearer ${sambaNovaApiKey}`,
-            "Content-Type": "application/json",
-          },
-          timeoutMs: 45000,
-          providerLabel: "Groq",
-          onDelta: (delta) => {
-            streamedAny = true;
-            sseSend(res, "delta", { delta });
-          },
-          signal: abortController.signal,
-        });
-      } else {
-        aiReply = await sendSambaNovaCompletion(
-          messagesForModel,
-          maxTokens,
-          0.7,
-          CHAT_MODELS.sambanova.model
-        );
-        if (aiReply) {
+      aiReply = await streamOpenAICompatibleChatCompletions({
+        url: `${nvidiaBaseUrl}/chat/completions`,
+        payload: {
+          model: CHAT_MODELS.nvidia?.model || nvidiaChatModel,
+          messages: messagesForModel,
+          max_tokens: maxTokens,
+          temperature: 0.7,
+          stream: true,
+        },
+        headers: {
+          Authorization: `Bearer ${nvidiaApiKey}`,
+          "Content-Type": "application/json",
+        },
+        timeoutMs: 60000,
+        providerLabel: "NVIDIA Z-AI",
+        onDelta: (delta) => {
           streamedAny = true;
-          sseSend(res, "delta", { delta: aiReply });
-        }
-      }
+          sseSend(res, "delta", { delta });
+        },
+        signal: abortController.signal,
+      });
     } catch (err) {
       const partial = String(err?.partialText || "");
       if (partial) {
         aiReply = `${partial}\n\n[Note] Streaming was interrupted before completion.`;
       } else if (!streamedAny) {
         // Fallback to non-stream completion so the user still gets an answer.
-        if (selectedModelId === "groq") {
-          aiReply = await sendGroqCompletion(messagesForModel, maxTokens, 0.7);
-        } else {
-          aiReply = await sendSambaNovaCompletion(
-            messagesForModel,
-            maxTokens,
-            0.7,
-            CHAT_MODELS.sambanova.model
-          );
-        }
+        aiReply = await sendNvidiaCompletion(messagesForModel, maxTokens, 0.7, CHAT_MODELS.nvidia?.model);
         if (aiReply) sseSend(res, "delta", { delta: aiReply });
       } else {
         throw err;
@@ -4291,6 +4454,11 @@ app.post("/api/messages/stream", authMiddleware, async (req, res) => {
     for (const attachment of codeExport.attachments) {
       await attachmentModel.linkToMessage(assistantRecord.id, attachment.id);
     }
+
+    // Background persistent user memory extraction
+    userContextService.extractAndSaveUserMemory(req.user.id, parsedSessionId, content, codeExport.content).catch((err) =>
+      console.warn("[User Context] Background memory extraction failed:", err?.message || err)
+    );
 
     const messages = await messageModel.getBySessionId(parsedSessionId);
     sseSend(res, "final", { messages });
@@ -4437,7 +4605,7 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
         const assistantRecord = await messageModel.create(
           parsedSessionId,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
+          'Selected model "Dino 1.0" is unavailable because NVIDIA_API_KEY is not configured.',
           selectedModel
         );
         void assistantRecord;
@@ -4450,6 +4618,11 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
               await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
             } catch (indexErr) {
               console.error("Web RAG indexing failed:", indexErr?.message || indexErr);
+            }
+            if (semanticState.enabled) {
+              semanticStateGraph
+                .recordWebObservation(req.user.id, parsedSessionId, { query: content, sources })
+                .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
             }
           }
           const crossChatContext = shouldReviewAcrossChats(content)
@@ -4559,6 +4732,11 @@ app.post("/api/messages", authMiddleware, async (req, res) => {
           await indexWebSourcesForRag(req.user.id, parsedSessionId, sources);
         } catch (err) {
           console.error("Web RAG indexing failed:", err?.message || err);
+        }
+        if (semanticState.enabled) {
+          semanticStateGraph
+            .recordWebObservation(req.user.id, parsedSessionId, { query: content, sources })
+            .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
         }
       }
       const crossChatContext = shouldReviewAcrossChats(content)
@@ -4672,6 +4850,62 @@ app.post("/api/sessions/:id/share", authMiddleware, async (req, res) => {
   }
 });
 
+// ============================================================================
+// User Profile & Persistent Context API Endpoints
+// ============================================================================
+
+app.get("/api/user/profile", authMiddleware, async (req, res) => {
+  try {
+    const profile = await userProfileModel.getByUserId(req.user.id);
+    res.json({ profile: profile || {} });
+  } catch (err) {
+    console.error("GET /api/user/profile error:", err);
+    res.status(500).json({ error: "Failed to fetch user profile" });
+  }
+});
+
+app.put("/api/user/profile", authMiddleware, async (req, res) => {
+  try {
+    const { displayName, aboutUser, globalInstructions, preferences } = req.body || {};
+    const updated = await userProfileModel.update(req.user.id, {
+      displayName,
+      aboutUser,
+      globalInstructions,
+      preferences,
+    });
+    res.json({ success: true, profile: updated });
+  } catch (err) {
+    console.error("PUT /api/user/profile error:", err);
+    res.status(500).json({ error: "Failed to update user profile" });
+  }
+});
+
+app.get("/api/user/memories", authMiddleware, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const memories = await userContextService.getUserMemories(req.user.id, limit, offset);
+    res.json({ memories });
+  } catch (err) {
+    console.error("GET /api/user/memories error:", err);
+    res.status(500).json({ error: "Failed to fetch user memories" });
+  }
+});
+
+app.delete("/api/user/memories/:id", authMiddleware, async (req, res) => {
+  try {
+    const memoryId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(memoryId)) {
+      return res.status(400).json({ error: "Valid memory ID required" });
+    }
+    const deleted = await userContextService.deleteUserMemory(req.user.id, memoryId);
+    res.json({ success: deleted });
+  } catch (err) {
+    console.error("DELETE /api/user/memories error:", err);
+    res.status(500).json({ error: "Failed to delete memory" });
+  }
+});
+
 app.get("/api/public/share/:token", async (req, res) => {
   try {
     const token = String(req.params.token || "").trim();
@@ -4771,7 +5005,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
     }
     const token = String(req.params.token || "").trim();
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const model = String(req.body?.model || "nvidia").trim().toLowerCase();
     // Anonymous chat: do not allow "Thinking mode" before login.
     const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
@@ -4799,7 +5033,7 @@ app.post("/api/public/share/:token/chat", async (req, res) => {
 app.post("/api/incognito/chat", authMiddleware, async (req, res) => {
   try {
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const model = String(req.body?.model || "nvidia").trim().toLowerCase();
     const thinking = !!req.body?.thinking;
     const lightning = !!req.body?.lightning;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
@@ -4825,7 +5059,7 @@ app.post("/api/public/chat", async (req, res) => {
       return res.status(403).json({ error: "Public chat is disabled for logged-in sessions" });
     }
     const content = String(req.body?.content || "").trim();
-    const model = String(req.body?.model || "sambanova").trim().toLowerCase();
+    const model = String(req.body?.model || "nvidia").trim().toLowerCase();
     // Anonymous chat: do not allow "Thinking mode" before login.
     const thinking = false;
     const history = Array.isArray(req.body?.history) ? req.body.history : [];
@@ -4957,7 +5191,7 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
         const assistantRecord = await messageModel.create(
           targetMessage.session_id,
           "assistant",
-          'Selected model "Dino 1.0" is unavailable because GROQ_API_KEY is not configured.',
+          'Selected model "Dino 1.0" is unavailable because NVIDIA_API_KEY is not configured.',
           selectedModel
         );
         void assistantRecord;
@@ -4970,6 +5204,11 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
               await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
             } catch (indexErr) {
               console.error("Web RAG indexing failed during edit:", indexErr?.message || indexErr);
+            }
+            if (semanticState.enabled) {
+              semanticStateGraph
+                .recordWebObservation(req.user.id, targetMessage.session_id, { query: normalizedContent, sources })
+                .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
             }
           }
           const crossChatContext = shouldReviewAcrossChats(normalizedContent)
@@ -5079,6 +5318,11 @@ app.put("/api/messages/:id", authMiddleware, async (req, res) => {
           await indexWebSourcesForRag(req.user.id, targetMessage.session_id, sources);
         } catch (err) {
           console.error("Web RAG indexing failed during edit:", err?.message || err);
+        }
+        if (semanticState.enabled) {
+          semanticStateGraph
+            .recordWebObservation(req.user.id, targetMessage.session_id, { query: normalizedContent, sources })
+            .catch((err) => console.warn("[Semantic State] Web observation failed:", err?.message || err));
         }
       }
       const crossChatContext = shouldReviewAcrossChats(normalizedContent)
@@ -5227,6 +5471,10 @@ app.post("/api/attachments", authMiddleware, chatUpload.array('files', 10), asyn
       await indexAttachmentForRag(req.user.id, parseInt(sessionId, 10), attachment);
       attachmentIds.push(attachment.id);
       attachments.push(attachment);
+    }
+
+    if (semanticState.enabled) {
+      semanticStateGraph.invalidateKeyframe(req.user.id, parseInt(sessionId, 10), "dino_agent").catch(() => {});
     }
 
     res.json({ 

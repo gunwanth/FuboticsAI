@@ -3,19 +3,40 @@ const { buildRagContext, indexWebSourcesForRag } = require("./ragService");
 const knowledgeSourceModel = require("../models/knowledgeSource");
 const knowledgeChunkModel = require("../models/knowledgeChunk");
 const { executeCodeToolWithFallback } = require("./serenaConnector");
+const semanticStateConfig = require("../config/semanticState");
+const semanticStateGraph = require("./semanticStateGraphService");
 
-const SAMBANOVA_API_KEY = process.env.SAMBANOVA_API_KEY || null;
-const SAMBANOVA_BASE_URL = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
-const SAMBANOVA_CHAT_MODEL = process.env.SAMBANOVA_CHAT_MODEL || "Meta-Llama-3.3-70B-Instruct";
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || null;
 const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "deepseek-v4";
+const NVIDIA_CHAT_MODEL = process.env.NVIDIA_CHAT_MODEL || "z-ai/glm-5.3";
 
 // Dedicated key and model for coding generation
 const CODING_NVIDIA_API_KEY = process.env.CODING_NVIDIA_API_KEY || process.env.NVIDIA_API_KEY || null;
-const CODING_CHAT_MODEL = process.env.CODING_CHAT_MODEL || "Z-ai/glm-5.1";
+const CODING_CHAT_MODEL = process.env.CODING_CHAT_MODEL || "z-ai/glm-5.3";
+const CODING_FALLBACK_MODEL = process.env.CODING_FALLBACK_MODEL || "meta/llama-3.2-11b-vision-instruct";
 
 const CODING_AGENT_MAX_ITERS = Math.max(1, Math.min(10, Number.parseInt(process.env.CODING_AGENT_MAX_ITERATIONS || "3", 10)));
+
+function extractFirstJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch (_) {}
+
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = raw.slice(start, end + 1);
+    try {
+      const parsed = JSON.parse(slice);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch (_) {}
+  }
+  return null;
+}
 
 /**
  * Helper to send chat completions to NVIDIA API with structured tools
@@ -37,20 +58,37 @@ async function sendNVIDIACompletion(messages, tools = null, toolChoice = "auto")
     payload.tool_choice = toolChoice;
   }
 
-  let response;
   try {
-    response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
+    const response = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, payload, {
       headers: {
         Authorization: `Bearer ${CODING_NVIDIA_API_KEY}`,
         "Content-Type": "application/json",
       },
-      timeout: 60000,
+      timeout: 30000,
     });
-  } catch (err) {
-    throw new Error(`NVIDIA completion failed: ${extractProviderError(err)}`);
+    return response.data.choices[0].message;
+  } catch (primaryErr) {
+    if (CODING_CHAT_MODEL !== CODING_FALLBACK_MODEL) {
+      console.warn(`[Coding Agent] Primary model "${CODING_CHAT_MODEL}" failed (${primaryErr.message}). Retrying with fast fallback "${CODING_FALLBACK_MODEL}"...`);
+      try {
+        const fallbackPayload = {
+          ...payload,
+          model: CODING_FALLBACK_MODEL,
+        };
+        const fallbackRes = await axios.post(`${NVIDIA_BASE_URL}/chat/completions`, fallbackPayload, {
+          headers: {
+            Authorization: `Bearer ${CODING_NVIDIA_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 25000,
+        });
+        return fallbackRes.data.choices[0].message;
+      } catch (fallbackErr) {
+        throw new Error(`NVIDIA completion failed: ${extractProviderError(primaryErr)}`);
+      }
+    }
+    throw new Error(`NVIDIA completion failed: ${extractProviderError(primaryErr)}`);
   }
-
-  return response.data.choices[0].message;
 }
 
 function extractProviderError(err) {
@@ -63,42 +101,6 @@ function extractProviderError(err) {
     "Unknown provider error";
 
   return status ? `HTTP ${status}: ${providerMessage}` : String(providerMessage);
-}
-
-/**
- * Helper to send chat completions to SambaNova API with structured tools
- */
-async function sendSambaNovaCompletion(messages, tools = null, toolChoice = "auto") {
-  if (!SAMBANOVA_API_KEY) {
-    throw new Error("Coding Agent requires a valid SambaNova API Key.");
-  }
-
-  const payload = {
-    model: SAMBANOVA_CHAT_MODEL,
-    messages,
-    temperature: 0.5,
-    max_tokens: 4096,
-  };
-
-  if (tools) {
-    payload.tools = tools;
-    payload.tool_choice = toolChoice;
-  }
-
-  let response;
-  try {
-    response = await axios.post(`${SAMBANOVA_BASE_URL}/chat/completions`, payload, {
-      headers: {
-        Authorization: `Bearer ${SAMBANOVA_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 60000,
-    });
-  } catch (err) {
-    throw new Error(`SambaNova completion failed: ${extractProviderError(err)}`);
-  }
-
-  return response.data.choices[0].message;
 }
 
 /**
@@ -316,6 +318,10 @@ async function runCodingAgentLoop(userId, sessionId, messages, model = "coding_a
     const agentInstruction = String(options?.agentInstruction || "").trim();
     const agentLabel = String(options?.agentLabel || "Coding Agent").trim() || "Coding Agent";
 
+    // Cognitive-state variables (set during meta-bridge injection, used in feedback loop).
+    let codingTask = "code analysis";
+    let metaResult = null;
+
     // Prepare conversation history - limit to last 5 messages to reduce payload
     const recentMessages = messages.slice(-5);
     const conversationHistory = recentMessages.map(m => ({
@@ -348,6 +354,32 @@ When helping with code:
 Be professional, precise, and focused on code quality. IMPORTANT: Keep responses concise and under 2000 characters.` + (agentInstruction ? `\n\nAdditional execution profile for this task (${agentLabel}):\n${agentInstruction}` : ""),
     };
 
+    // Meta-bridge + semantic neighborhood injection (bounded, non-fatal).
+    if (semanticStateConfig.enabled) {
+      try {
+        codingTask = String(conversationHistory.find((m) => m.role === "user")?.content || "code analysis").slice(0, 500);
+        metaResult = await semanticStateGraph.observeAndSyncAgentState(userId, sessionId, "coding_agent", {
+          task: codingTask,
+          sessionHistory: recentMessages,
+          capabilityOverrides: CODING_AGENT_TOOLS.map((t) => t.function?.name || t.name).filter(Boolean),
+        });
+        if (metaResult?.metaBridge) {
+          systemMessage.content += `\n\n[Cognitive State — your current meta-bridge]\n${metaResult.metaBridge}`;
+        }
+        if (metaResult?.neighborhoodNodes?.length) {
+          const labels = metaResult.neighborhoodNodes.map((n) => `${n.kind}:${n.label}`).join(" | ");
+          systemMessage.content += `\n[Semantic Neighborhood]\n${labels}`;
+        }
+      } catch (err) {
+        console.warn("[Coding Agent] Cognitive state injection failed:", err?.message || err);
+      }
+    }
+
+    if (!conversationHistory.some(m => m.role === "user")) {
+      const fallbackQuery = typeof options?.query === "string" ? options.query : "Help me develop this code.";
+      conversationHistory.push({ role: "user", content: fallbackQuery });
+    }
+
     if (conversationHistory[0]?.role !== "system") {
       conversationHistory.unshift(systemMessage);
     }
@@ -375,9 +407,66 @@ Be professional, precise, and focused on code quality. IMPORTANT: Keep responses
       conversationHistory.push(assistantMessage);
 
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        const content = String(assistantMessage.content || "").trim();
+        const parsedTextTool = extractFirstJsonObject(content);
+        const isToolCall =
+          parsedTextTool &&
+          typeof parsedTextTool === "object" &&
+          (parsedTextTool.name || (parsedTextTool.action === "tool" && parsedTextTool.name));
+
+        if (isToolCall) {
+          const name = String(parsedTextTool.name || "").trim();
+          const args = parsedTextTool.parameters || parsedTextTool.arguments || {};
+          console.log(`[Coding Agent Text Tool Action] ${name}:`, args);
+          let result;
+          try {
+            if (name === "search_codebase" || name === "read_project_file" || name === "list_project_files") {
+              const toolResult = await executeCodeToolWithFallback(name, args, { requestedByAgent: agentLabel });
+              result = toolResult.display;
+            } else if (name === "search_rag") {
+              const ragResult = await buildRagContext(userId, sessionId, args.query, args.limit || 6, 0.15);
+              result = (ragResult.context || "No relevant code patterns found in knowledge base.").slice(0, 1000);
+            } else if (name === "store_code_knowledge") {
+              const source = await knowledgeSourceModel.createInsight(
+                userId,
+                sessionId,
+                args.title || "Code Pattern",
+                args.content,
+                args.tags || ["coding", "pattern"]
+              );
+              const chunks = chunkText(args.content);
+              await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+              result = `Successfully stored "${args.title}" in knowledge base.`;
+            } else {
+              result = `Unknown tool: ${name}`;
+            }
+          } catch (e) {
+            result = `Error executing ${name}: ${e.message}`;
+          }
+
+          conversationHistory.push({
+            role: "system",
+            content: `Tool "${name}" Result:\n${result}`,
+          });
+          continue;
+        }
+
         console.log("[Coding Agent] Final answer reached.");
         // Truncate final response to 3000 chars to prevent payload overflow
         const finalResponse = String(assistantMessage.content || "").slice(0, 3000);
+        if (semanticStateConfig.enabled) {
+          semanticStateGraph
+            .runCognitiveFeedbackLoop(userId, sessionId, {
+              agentId: "coding_agent",
+              query: codingTask,
+              goal: codingTask,
+              neighborhood: metaResult?.neighborhoodNodes?.length ? { nodes: metaResult.neighborhoodNodes, edges: [] } : null,
+              replyText: finalResponse,
+              citationCount: (finalResponse.match(/\[RAG \d+\]|Sources:|https?:\/\//g) || []).length,
+              latencyMs: 0,
+            })
+            .catch((err) => console.warn("[Semantic State] Coding feedback loop failed:", err?.message || err));
+        }
         return finalResponse;
       }
 
@@ -432,6 +521,17 @@ Be professional, precise, and focused on code quality. IMPORTANT: Keep responses
             }];
 
             await knowledgeChunkModel.replaceChunksForSource(source.id, userId, sessionId, chunks);
+            if (semanticStateConfig.enabled) {
+              semanticStateGraph
+                .recordInsight(userId, sessionId, {
+                  sourceId: source.id,
+                  agentId: "coding_agent",
+                  tags: Array.isArray(args.tags) ? args.tags : [],
+                  content: args.content,
+                  title: args.title,
+                })
+                .catch((err) => console.warn("[Semantic State] Coding insight record failed:", err?.message || err));
+            }
             result = `Stored: "${args.title}"`;
           } else {
             result = `Unknown tool: ${name}`;
@@ -451,7 +551,21 @@ Be professional, precise, and focused on code quality. IMPORTANT: Keep responses
     }
 
     const finalResp = conversationHistory[conversationHistory.length - 1].content || "";
-    return String(finalResp).slice(0, 3000);
+    const loopExhaustedReply = String(finalResp).slice(0, 3000);
+    if (semanticStateConfig.enabled) {
+      semanticStateGraph
+        .runCognitiveFeedbackLoop(userId, sessionId, {
+          agentId: "coding_agent",
+          query: codingTask,
+          goal: codingTask,
+          neighborhood: metaResult?.neighborhoodNodes?.length ? { nodes: metaResult.neighborhoodNodes, edges: [] } : null,
+          replyText: loopExhaustedReply,
+          citationCount: (loopExhaustedReply.match(/\[RAG \d+\]|Sources:|https?:\/\//g) || []).length,
+          latencyMs: 0,
+        })
+        .catch((err) => console.warn("[Semantic State] Coding feedback loop failed:", err?.message || err));
+    }
+    return loopExhaustedReply;
   } catch (outerErr) {
     console.error("[Coding Agent] Fatal error:", outerErr);
     throw outerErr;
