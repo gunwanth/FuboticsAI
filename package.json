@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "concurrently \"npm run dev --prefix fubotics-chat-backend\" \"npm run dev --prefix fubotics-chat-frontend\""
+    "start": "node api.js && concurrently \"npm run dev --prefix fubotics-chat-backend\" \"npm run dev --prefix fubotics-chat-frontend\""
   },
   "dependencies": {
     "@huggingface/inference": "^4.13.15",
