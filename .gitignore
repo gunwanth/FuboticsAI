@@ -3,8 +3,6 @@ node_modules/
 .uv-cache/
 
 # Local secrets and env files
-.env
-.env.*
 !.env.production.example
 !.env*.example
 fubotics-chat-backend/.env
@@ -13,7 +11,6 @@ fubotics-chat-backend/.env.*
 !fubotics-chat-backend/.env*.example
 
 # Local editor / assistant state
-.vscode/
 .claude/
 .serena/
 
@@ -32,3 +29,4 @@ fubotics-chat-backend/config/database.js files.
 branch_structure.json
 temp_auto_push.bat
 temp_interactive_push.bat
+config.bat
