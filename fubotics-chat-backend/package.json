@@ -4,8 +4,8 @@
   "description": "Fubotics AI Chat Backend",
   "main": "index.js",
   "scripts": {
-    "start": "node init && node index.js",
-    "dev": "node init && nodemon index.js",
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "image-worker": "python image_worker/app.py",
     "mcp": "node mcp-server/server.js",
     "mcp:http": "node mcp-server/http-server.js",
